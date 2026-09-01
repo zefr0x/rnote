@@ -1,9 +1,4 @@
-project(
-    'rnote',
-    ['rust', 'cpp'],
-    version: '0.11.0',
-    meson_version: '>= 1.0',
-)
+project('rnote', ['rust', 'cpp'], version: '0.15.0', meson_version: '>= 1.0')
 # add a patch suffix for alpha or beta versions in format '-<alpha|beta>.<x>'.
 patch = ''
 
@@ -21,6 +16,7 @@ sysconfdir = prefix / get_option('sysconfdir')
 profile = get_option('profile')
 build_ui = get_option('ui')
 build_cli = get_option('cli')
+ci = get_option('ci')
 win_build_environment_path = get_option('win-build-environment-path')
 win_installer_name = get_option('win-installer-name')
 
@@ -29,6 +25,7 @@ app_name_capitalized = 'Rnote'
 cli_name = 'rnote-cli'
 base_id = 'com.github.flxzt.' + app_name
 app_website = 'https://rnote.flxzt.net'
+app_repo_url = 'https://github.com/flxzt/rnote'
 app_issues_url = 'https://github.com/flxzt/rnote/issues'
 app_support_url = 'https://github.com/flxzt/rnote/discussions'
 app_donate_url = 'https://rnote.flxzt.net/donate/'
@@ -61,19 +58,16 @@ else
 endif
 
 # Dependencies
-cpp_compiler = meson.get_compiler('cpp')
-# Rust bindings to C++ using autocxx need libclang
-# However when building as flatpak libclang is not found, even though the llvm extension is installed.
-# TODO: How to fix this?
-#cpp_compiler.find_library('clang')
 dependency('glib-2.0', version: '>= 2.76')
 dependency('gio-2.0', version: '>= 2.76')
 dependency('cairo', version: '>= 1.18')
+# UI/CLI specific dependencies are declared below
 
 cargo = find_program('cargo', required: true)
 # cmake is needed by the "ink-stroke-modeler-rs" bindings crate to build the C++ library
 find_program('cmake', required: true)
 find_program('glib-compile-resources', required: true)
+cargo_nextest = find_program('cargo-nextest', required: false)
 glib_compile_schemas = find_program('glib-compile-schemas', required: true)
 desktop_file_validate = find_program('desktop-file-validate', required: false)
 appstreamcli = find_program('appstreamcli', required: false)
@@ -92,55 +86,36 @@ meson.add_dist_script(
     meson.project_source_root(),
 )
 
-if profile == 'devel'
-    # Setup pre-commit hook for ensuring coding style is always consistent
-    message('Setting up git pre-commit hook..')
-    run_command(
-        'cp',
-        '-f',
-        'hooks/pre-commit.hook',
-        '.git/hooks/pre-commit',
-        check: false,
-    )
-endif
-
 # core crates
 subdir('crates/rnote-compose')
 subdir('crates/rnote-engine')
-
 
 # cargo fmt check
 run_target(
     'cargo-fmt-check',
     command: [
         cargo,
-        [
-            'fmt',
-            '--all',
-            '--check',
-            '--manifest-path',
-            cargo_manifest_path,
-        ],
+        ['fmt', '--all', '--check', '--manifest-path', cargo_manifest_path],
     ],
     env: cargo_env,
 )
 
-# cargo test
-run_target(
-    'cargo-test',
-    command: [
-        cargo,
-        [
-            'test',
-            '--workspace',
-            '--manifest-path',
-            cargo_manifest_path,
-            '--target-dir',
-            cargo_target_dir,
-        ],
-    ],
-    env: cargo_env,
-)
+# cargo tests
+if cargo_nextest.found()
+    nextest_args = [
+        'nextest',
+        '--manifest-path',
+        cargo_manifest_path,
+        'run',
+        '--workspace',
+        '--target-dir',
+        cargo_target_dir,
+    ]
+    if ci == true
+        nextest_args += ['--profile', 'ci']
+    endif
+    run_target('cargo-test', command: [cargo, nextest_args], env: cargo_env)
+endif
 
 # cargo clean
 run_target(
@@ -162,9 +137,8 @@ run_target(
 if build_ui == true
     # ui dependencies
     dependency('appstream')
-    dependency('poppler-glib', version: '>= 22.02')
-    dependency('gtk4', version: '>= 4.12')
-    dependency('libadwaita-1', version: '>= 1.4')
+    dependency('gtk4', version: '>= 4.18')
+    dependency('libadwaita-1', version: '>= 1.7')
 
     # ui crate
     subdir('crates/rnote-ui')
@@ -201,33 +175,21 @@ if build_ui == true
     # ui cargo check
     run_target(
         'ui-cargo-check',
-        command: [
-            cargo,
-            'check',
-            ui_cargo_options,
-        ],
+        command: [cargo, 'check', ui_cargo_options],
         env: cargo_env,
     )
 
     # ui cargo clippy
     run_target(
         'ui-cargo-clippy',
-        command: [
-            cargo,
-            'clippy',
-            ui_cargo_options,
-        ],
+        command: [cargo, 'clippy', ui_cargo_options],
         env: cargo_env,
     )
 
     # ui cargo doc
     run_target(
         'ui-cargo-doc',
-        command: [
-            cargo,
-            'doc',
-            ui_cargo_options,
-        ],
+        command: [cargo, 'doc', ui_cargo_options],
         env: cargo_env,
     )
 
@@ -244,7 +206,7 @@ if build_ui == true
             cargo_build_script,
             meson.project_build_root(),
             meson.project_source_root(),
-            cargo_env,
+            ' '.join(cargo_env),
             cargo,
             ' '.join(ui_cargo_options),
             cargo_target_dir / rust_target_folder / app_name,
@@ -274,7 +236,10 @@ if build_ui == true
     inno_script_conf = configuration_data()
     inno_script_conf.set_quoted('MESON_SOURCE_ROOT', meson.project_source_root())
     inno_script_conf.set_quoted('MESON_BUILD_ROOT', meson.project_build_root())
-    inno_script_conf.set_quoted('BUILD_ENVIRONMENT_PATH', win_build_environment_path)
+    inno_script_conf.set_quoted(
+        'BUILD_ENVIRONMENT_PATH',
+        win_build_environment_path,
+    )
     inno_script_conf.set_quoted('APP_NAME', app_name)
     inno_script_conf.set_quoted('APP_NAME_CAPITALIZED', app_name_capitalized)
     inno_script_conf.set_quoted('APP_ID', app_id)
@@ -283,6 +248,7 @@ if build_ui == true
     inno_script_conf.set_quoted('APP_AUTHOR_NAME', app_author_name)
     inno_script_conf.set_quoted('APP_AUTHORS', app_authors)
     inno_script_conf.set_quoted('APP_WEBSITE', app_website)
+    inno_script_conf.set_quoted('APP_REPO_URL', app_repo_url)
     inno_script_conf.set_quoted('APP_ISSUES_URL', app_issues_url)
     inno_script_conf.set_quoted('APP_SUPPORT_URL', app_support_url)
     inno_script_conf.set_quoted('APP_DONATE_URL', app_donate_url)
@@ -295,7 +261,22 @@ if build_ui == true
         configuration: inno_script_conf,
     )
 
+    if build_cli and host_machine.system() == 'windows'
+        define_cli_output = '/DMyAppCliExeName=' + cli_name + '.exe'
+    else
+        define_cli_output = ''
+    endif
+
     if host_machine.system() == 'windows'
+        # the inno_build_script build script will
+        # package the cli if its name is provided
+        # so only give the name if the cli is
+        # actually built
+        if build_cli
+            package_cli_name = cli_name
+        else
+            package_cli_name = ''
+        endif
         # build installer
         custom_target(
             'build-installer',
@@ -311,6 +292,7 @@ if build_ui == true
                 app_id,
                 ui_output,
                 meson.project_build_root() / '@INPUT@',
+                package_cli_name,
             ],
             build_by_default: false,
             depends: app_cargo_build,
@@ -353,33 +335,21 @@ if build_cli == true
     # cli cargo check
     run_target(
         'cli-cargo-check',
-        command: [
-            cargo,
-            'check',
-            cli_cargo_options,
-        ],
+        command: [cargo, 'check', cli_cargo_options],
         env: cargo_env,
     )
 
     # cli cargo clippy
     run_target(
         'cli-cargo-clippy',
-        command: [
-            cargo,
-            'clippy',
-            cli_cargo_options,
-        ],
+        command: [cargo, 'clippy', cli_cargo_options],
         env: cargo_env,
     )
 
     # cli cargo doc
     run_target(
         'cli-cargo-doc',
-        command: [
-            cargo,
-            'doc',
-            cli_cargo_options,
-        ],
+        command: [cargo, 'doc', cli_cargo_options],
         env: cargo_env,
     )
 

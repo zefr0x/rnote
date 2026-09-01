@@ -1,20 +1,20 @@
 // Imports
 use crate::{
-    groupediconpicker::GroupedIconPickerGroupData, RnAppWindow, RnCanvasWrapper,
-    RnGroupedIconPicker, RnStrokeWidthPicker,
+    RnAppWindow, RnGroupedIconPicker, RnStrokeWidthPicker,
+    groupediconpicker::GroupedIconPickerGroupData,
 };
 use adw::{prelude::*, subclass::prelude::*};
 use gettextrs::gettext;
 use gtk4::{
-    glib, glib::clone, Button, CompositeTemplate, ListBox, MenuButton, Popover, StringList,
+    Button, CompositeTemplate, ListBox, MenuButton, Popover, StringList, Widget, glib, glib::clone,
 };
 use num_traits::cast::ToPrimitive;
 use rnote_compose::builders::ShapeBuilderType;
 use rnote_compose::constraints::ConstraintRatio;
 use rnote_compose::style::rough::roughoptions::FillStyle;
-use rnote_compose::style::smooth::SmoothOptions;
-use rnote_engine::pens::pensconfig::shaperconfig::ShaperStyle;
+use rnote_compose::style::smooth::{LineCap, LineStyle, SmoothOptions};
 use rnote_engine::pens::pensconfig::ShaperConfig;
+use rnote_engine::pens::pensconfig::shaperconfig::ShaperStyle;
 
 mod imp {
     use super::*;
@@ -23,7 +23,20 @@ mod imp {
     #[template(resource = "/com/github/flxzt/rnote/ui/penssidebar/shaperpage.ui")]
     pub(crate) struct RnShaperPage {
         #[template_child]
-        pub(crate) shaperstyle_menubutton: TemplateChild<MenuButton>,
+        pub(crate) shapebuildertype_menubutton: TemplateChild<MenuButton>,
+        #[template_child]
+        pub(crate) shapebuildertype_popover: TemplateChild<Popover>,
+        #[template_child]
+        pub(crate) shapebuildertype_popover_close_button: TemplateChild<Button>,
+        #[template_child]
+        pub(crate) shapebuildertype_picker: TemplateChild<RnGroupedIconPicker>,
+
+        #[template_child]
+        pub(crate) shapeconfig_menubutton: TemplateChild<MenuButton>,
+        #[template_child]
+        pub(crate) shapeconfig_popover: TemplateChild<Popover>,
+        #[template_child]
+        pub(crate) shapeconfig_popover_close_button: TemplateChild<Button>,
         #[template_child]
         pub(crate) shaperstyle_listbox: TemplateChild<ListBox>,
         #[template_child]
@@ -31,19 +44,21 @@ mod imp {
         #[template_child]
         pub(crate) shaperstyle_rough_row: TemplateChild<adw::ActionRow>,
         #[template_child]
-        pub(crate) shapeconfig_menubutton: TemplateChild<MenuButton>,
+        pub(crate) highlight_mode_row: TemplateChild<adw::SwitchRow>,
+        #[template_child]
+        pub(crate) highlight_opacity_row: TemplateChild<adw::SpinRow>,
+        #[template_child]
+        pub(crate) smoothstyle_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child]
+        pub(crate) smoothstyle_line_cap_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) smoothstyle_line_style_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) roughstyle_group: TemplateChild<adw::PreferencesGroup>,
         #[template_child]
         pub(crate) roughstyle_fillstyle_row: TemplateChild<adw::ComboRow>,
         #[template_child]
         pub(crate) roughstyle_hachure_angle_row: TemplateChild<adw::SpinRow>,
-        #[template_child]
-        pub(crate) stroke_width_picker: TemplateChild<RnStrokeWidthPicker>,
-        #[template_child]
-        pub(crate) shapebuildertype_menubutton: TemplateChild<MenuButton>,
-        #[template_child]
-        pub(crate) shapebuildertype_picker: TemplateChild<RnGroupedIconPicker>,
-        #[template_child]
-        pub(crate) constraint_menubutton: TemplateChild<MenuButton>,
         #[template_child]
         pub(crate) constraint_enabled_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
@@ -52,29 +67,16 @@ mod imp {
         pub(crate) constraint_three_to_two_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) constraint_golden_row: TemplateChild<adw::SwitchRow>,
+
         #[template_child]
-        pub(crate) shaperstyle_popover: TemplateChild<Popover>,
-        #[template_child]
-        pub(crate) shaperstyle_popover_close_button: TemplateChild<Button>,
-        #[template_child]
-        pub(crate) shapeconfig_popover: TemplateChild<Popover>,
-        #[template_child]
-        pub(crate) shapeconfig_popover_close_button: TemplateChild<Button>,
-        #[template_child]
-        pub(crate) shapebuildertype_popover: TemplateChild<Popover>,
-        #[template_child]
-        pub(crate) shapebuildertype_popover_close_button: TemplateChild<Button>,
-        #[template_child]
-        pub(crate) constraint_popover: TemplateChild<Popover>,
-        #[template_child]
-        pub(crate) constraint_popover_close_button: TemplateChild<Button>,
+        pub(crate) stroke_width_picker: TemplateChild<RnStrokeWidthPicker>,
     }
 
     #[glib::object_subclass]
     impl ObjectSubclass for RnShaperPage {
         const NAME: &'static str = "RnShaperPage";
         type Type = super::RnShaperPage;
-        type ParentType = gtk4::Widget;
+        type ParentType = Widget;
 
         fn class_init(klass: &mut Self::Class) {
             klass.bind_template();
@@ -103,7 +105,8 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnShaperPage(ObjectSubclass<imp::RnShaperPage>)
-        @extends gtk4::Widget;
+        @extends Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 
 impl Default for RnShaperPage {
@@ -117,20 +120,12 @@ impl RnShaperPage {
         glib::Object::new()
     }
 
-    pub(crate) fn shaperstyle_menubutton(&self) -> MenuButton {
-        self.imp().shaperstyle_menubutton.get()
-    }
-
     pub(crate) fn shapeconfig_menubutton(&self) -> MenuButton {
         self.imp().shapeconfig_menubutton.get()
     }
 
     pub(crate) fn shapebuildertype_menubutton(&self) -> MenuButton {
         self.imp().shapebuildertype_menubutton.get()
-    }
-
-    pub(crate) fn constraint_menubutton(&self) -> MenuButton {
-        self.imp().constraint_menubutton.get()
     }
 
     pub(crate) fn shaper_style(&self) -> Option<ShaperStyle> {
@@ -161,6 +156,14 @@ impl RnShaperPage {
             .set_picked(Some(builder_type.to_icon_name()));
     }
 
+    pub(crate) fn smoothstyle_line_cap(&self) -> LineCap {
+        LineCap::try_from(self.imp().smoothstyle_line_cap_row.get().selected()).unwrap()
+    }
+
+    pub(crate) fn smoothstyle_line_style(&self) -> LineStyle {
+        LineStyle::try_from(self.imp().smoothstyle_line_style_row.get().selected()).unwrap()
+    }
+
     pub(crate) fn roughstyle_fillstyle(&self) -> FillStyle {
         FillStyle::try_from(self.imp().roughstyle_fillstyle_row.get().selected()).unwrap()
     }
@@ -180,32 +183,26 @@ impl RnShaperPage {
 
     pub(crate) fn init(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
-        let shaperstyle_popover = imp.shaperstyle_popover.get();
         let shapeconfig_popover = imp.shapeconfig_popover.get();
         let shapebuildertype_popover = imp.shapebuildertype_popover.get();
-        let constraint_popover = imp.constraint_popover.get();
 
         // Popovers
-        imp.shaperstyle_popover_close_button.connect_clicked(
-            clone!(@weak shaperstyle_popover => move |_| {
-                shaperstyle_popover.popdown();
-            }),
-        );
-        imp.shapeconfig_popover_close_button.connect_clicked(
-            clone!(@weak shapeconfig_popover => move |_| {
+        imp.shapeconfig_popover_close_button.connect_clicked(clone!(
+            #[weak]
+            shapeconfig_popover,
+            move |_| {
                 shapeconfig_popover.popdown();
-            }),
-        );
-        imp.shapebuildertype_popover_close_button.connect_clicked(
-            clone!(@weak shapebuildertype_popover => move |_| {
-                shapebuildertype_popover.popdown();
-            }),
-        );
-        imp.constraint_popover_close_button.connect_clicked(
-            clone!(@weak constraint_popover => move |_| {
-                constraint_popover.popdown();
-            }),
-        );
+            }
+        ));
+
+        imp.shapebuildertype_popover_close_button
+            .connect_clicked(clone!(
+                #[weak]
+                shapebuildertype_popover,
+                move |_| {
+                    shapebuildertype_popover.popdown();
+                }
+            ));
 
         // Stroke width
         imp.stroke_width_picker.spinbutton().set_range(
@@ -218,55 +215,218 @@ impl RnShaperPage {
 
         imp.stroke_width_picker.connect_notify_local(
             Some("stroke-width"),
-            clone!(@weak self as shaperpage, @weak appwindow => move |picker, _| {
-                let stroke_width = picker.stroke_width();
-                let canvas = appwindow.active_tab_wrapper().canvas();
-                let shaper_style = canvas.engine_ref().pens_config.shaper_config.style;
+            clone!(
+                #[weak]
+                appwindow,
+                move |picker, _| {
+                    let stroke_width = picker.stroke_width();
+                    let shaper_style = appwindow
+                        .engine_config()
+                        .read()
+                        .pens_config
+                        .shaper_config
+                        .style;
 
-                match shaper_style {
-                    ShaperStyle::Smooth => {
-                        canvas.engine_mut().pens_config.shaper_config.smooth_options.stroke_width = stroke_width;
-                    },
-                    ShaperStyle::Rough => {
-                        canvas.engine_mut().pens_config.shaper_config.rough_options.stroke_width = stroke_width;
-                    },
+                    match shaper_style {
+                        ShaperStyle::Smooth => {
+                            let smooth_options: &mut SmoothOptions = &mut appwindow
+                                .engine_config()
+                                .write()
+                                .pens_config
+                                .shaper_config
+                                .smooth_options;
+
+                            smooth_options.stroke_width = stroke_width;
+                            smooth_options.update_piet_stroke_style();
+                        }
+                        ShaperStyle::Rough => {
+                            appwindow
+                                .engine_config()
+                                .write()
+                                .pens_config
+                                .shaper_config
+                                .rough_options
+                                .stroke_width = stroke_width;
+                        }
+                    }
                 }
-            }),
+            ),
         );
 
         // Shaper style
-        imp.shaperstyle_listbox.connect_row_selected(
-            clone!(@weak self as shaperpage, @weak appwindow => move |_, _| {
+        imp.shaperstyle_listbox.connect_row_selected(clone!(
+            #[weak(rename_to=shaperpage)]
+            self,
+            #[weak]
+            appwindow,
+            move |_, _| {
                 if let Some(shaper_style) = shaperpage.shaper_style() {
-                    appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.style = shaper_style;
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .shaper_config
+                        .style = shaper_style;
                     shaperpage.stroke_width_picker().deselect_setters();
 
                     match shaper_style {
                         ShaperStyle::Smooth => {
-                            let stroke_width = appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.smooth_options.stroke_width;
-                            shaperpage.imp().stroke_width_picker.set_stroke_width(stroke_width);
-                            shaperpage.imp().shaperstyle_menubutton.set_icon_name("pen-shaper-style-smooth-symbolic");
-                        },
+                            let stroke_width = appwindow
+                                .engine_config()
+                                .read()
+                                .pens_config
+                                .shaper_config
+                                .smooth_options
+                                .stroke_width;
+                            let page = shaperpage.imp();
+                            page.roughstyle_group.set_visible(false);
+                            page.smoothstyle_group.set_visible(true);
+                            page.stroke_width_picker.set_stroke_width(stroke_width);
+                        }
                         ShaperStyle::Rough => {
-                            let stroke_width = appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.rough_options.stroke_width;
-                            shaperpage.imp().stroke_width_picker.set_stroke_width(stroke_width);
-                            shaperpage.imp().shaperstyle_menubutton.set_icon_name("pen-shaper-style-rough-symbolic");
-                        },
+                            let stroke_width = appwindow
+                                .engine_config()
+                                .read()
+                                .pens_config
+                                .shaper_config
+                                .rough_options
+                                .stroke_width;
+                            let page = shaperpage.imp();
+                            page.smoothstyle_group.set_visible(false);
+                            page.roughstyle_group.set_visible(true);
+                            page.stroke_width_picker.set_stroke_width(stroke_width);
+                        }
                     }
                 }
-            }),
-        );
+            }
+        ));
+
+        // Highlighter options
+        imp.highlight_mode_row.connect_active_notify(clone!(
+            #[weak]
+            appwindow,
+            move |row| {
+                appwindow
+                    .engine_config()
+                    .write()
+                    .pens_config
+                    .shaper_config
+                    .highlight_mode = row.is_active();
+            }
+        ));
+
+        imp.highlight_opacity_row.connect_changed(clone!(
+            #[weak]
+            appwindow,
+            move |row| {
+                appwindow
+                    .engine_config()
+                    .write()
+                    .pens_config
+                    .shaper_config
+                    .highlight_opacity = row.value().round() / 100.0;
+            }
+        ));
+
+        // Smooth style
+        // Line cap
+        imp.smoothstyle_line_cap_row
+            .get()
+            .connect_selected_notify(clone!(
+                #[weak(rename_to=shaperpage)]
+                self,
+                #[weak]
+                appwindow,
+                move |_| {
+                    let line_cap = shaperpage.smoothstyle_line_cap();
+
+                    // If the user has selected a straight line cap while the line style was dotted, then we update the line style to be straight
+                    if line_cap == LineCap::Straight
+                        && shaperpage.smoothstyle_line_style().is_dotted()
+                    {
+                        shaperpage
+                            .imp()
+                            .smoothstyle_line_style_row
+                            .set_selected(LineStyle::Solid.to_u32().unwrap())
+                    }
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .shaper_config
+                        .smooth_options
+                        .update_line_cap(line_cap);
+                }
+            ));
+
+        // Line style
+        imp.smoothstyle_line_style_row
+            .get()
+            .connect_selected_notify(clone!(
+                #[weak(rename_to=shaperpage)]
+                self,
+                #[weak]
+                appwindow,
+                move |_| {
+                    let line_style = shaperpage.smoothstyle_line_style();
+
+                    // If the user has selected a dotted line style, then we update the line cap to be rounded
+                    if line_style.is_dotted() {
+                        shaperpage
+                            .imp()
+                            .smoothstyle_line_cap_row
+                            .set_selected(LineCap::Rounded.to_u32().unwrap());
+                    }
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .shaper_config
+                        .smooth_options
+                        .update_line_style(line_style);
+                }
+            ));
 
         // Rough style
         // Fill style
-        imp.roughstyle_fillstyle_row.get().connect_selected_notify(clone!(@weak self as shaperpage, @weak appwindow => move |_roughstyle_fillstyle_row| {
-            appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.rough_options.fill_style = shaperpage.roughstyle_fillstyle();
-        }));
+        imp.roughstyle_fillstyle_row
+            .get()
+            .connect_selected_notify(clone!(
+                #[weak(rename_to=shaperpage)]
+                self,
+                #[weak]
+                appwindow,
+                move |_| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .shaper_config
+                        .rough_options
+                        .fill_style = shaperpage.roughstyle_fillstyle();
+                }
+            ));
 
         // Hachure angle
-        imp.roughstyle_hachure_angle_row.get().connect_changed(clone!(@weak self as shaperpage, @weak appwindow => move |row| {
-            appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.rough_options.hachure_angle = row.value().round().to_radians().clamp(-std::f64::consts::PI, std::f64::consts::PI);
-        }));
+        imp.roughstyle_hachure_angle_row
+            .get()
+            .connect_changed(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .shaper_config
+                        .rough_options
+                        .hachure_angle = row
+                        .value()
+                        .round()
+                        .to_radians()
+                        .clamp(-std::f64::consts::PI, std::f64::consts::PI);
+                }
+            ));
 
         // shape builder type
         imp.shapebuildertype_picker.set_groups(
@@ -276,62 +436,138 @@ impl RnShaperPage {
 
         imp.shapebuildertype_picker.connect_notify_local(
             Some("picked"),
-            clone!(@weak self as shaperpage, @weak appwindow => move |picker, _| {
-                if let (Some(buildertype), Some(icon_name)) = (shaperpage.shapebuildertype(), picker.picked()) {
-                    appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.builder_type = buildertype;
-                    shaperpage.imp().shapebuildertype_menubutton.set_icon_name(&icon_name);
+            clone!(
+                #[weak(rename_to=shaperpage)]
+                self,
+                #[weak]
+                appwindow,
+                move |picker, _| {
+                    if let Some(buildertype) = shaperpage.shapebuildertype()
+                        && let Some(icon_name) = picker.picked()
+                    {
+                        appwindow
+                            .engine_config()
+                            .write()
+                            .pens_config
+                            .shaper_config
+                            .builder_type = buildertype;
+                        shaperpage
+                            .imp()
+                            .shapebuildertype_menubutton
+                            .set_icon_name(&icon_name);
+                    }
                 }
-            }),
+            ),
         );
 
         // Constraints
-        imp
-            .constraint_enabled_row
+        imp.constraint_enabled_row
             .get()
-            .connect_active_notify(clone!(@weak appwindow => move |row|  {
-                appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.constraints.enabled = row.is_active();
-            }));
-
-        imp
-            .constraint_one_to_one_row
-            .get()
-            .connect_active_notify(clone!(@weak appwindow => move |row|  {
-                if row.is_active() {
-                    appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.constraints.ratios.insert(ConstraintRatio::OneToOne);
-                } else {
-                    appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.constraints.ratios.remove(&ConstraintRatio::OneToOne);
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .shaper_config
+                        .constraints
+                        .enabled = row.is_active();
                 }
-            }));
+            ));
 
-        imp
-            .constraint_three_to_two_row
+        imp.constraint_one_to_one_row
             .get()
-            .connect_active_notify(clone!(@weak appwindow => move |row|  {
-                if row.is_active() {
-                    appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.constraints.ratios.insert(ConstraintRatio::ThreeToTwo);
-                } else {
-                    appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.constraints.ratios.remove(&ConstraintRatio::ThreeToTwo);
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    if row.is_active() {
+                        appwindow
+                            .engine_config()
+                            .write()
+                            .pens_config
+                            .shaper_config
+                            .constraints
+                            .ratios
+                            .insert(ConstraintRatio::OneToOne);
+                    } else {
+                        appwindow
+                            .engine_config()
+                            .write()
+                            .pens_config
+                            .shaper_config
+                            .constraints
+                            .ratios
+                            .remove(&ConstraintRatio::OneToOne);
+                    }
                 }
-            }));
+            ));
 
-        imp
-            .constraint_golden_row
+        imp.constraint_three_to_two_row
             .get()
-            .connect_active_notify(clone!(@weak appwindow => move |row|  {
-                if row.is_active() {
-                    appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.constraints.ratios.insert(ConstraintRatio::Golden);
-                } else {
-                    appwindow.active_tab_wrapper().canvas().engine_mut().pens_config.shaper_config.constraints.ratios.remove(&ConstraintRatio::Golden);
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    if row.is_active() {
+                        appwindow
+                            .engine_config()
+                            .write()
+                            .pens_config
+                            .shaper_config
+                            .constraints
+                            .ratios
+                            .insert(ConstraintRatio::ThreeToTwo);
+                    } else {
+                        appwindow
+                            .engine_config()
+                            .write()
+                            .pens_config
+                            .shaper_config
+                            .constraints
+                            .ratios
+                            .remove(&ConstraintRatio::ThreeToTwo);
+                    }
                 }
-            }));
+            ));
+
+        imp.constraint_golden_row
+            .get()
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    if row.is_active() {
+                        appwindow
+                            .engine_config()
+                            .write()
+                            .pens_config
+                            .shaper_config
+                            .constraints
+                            .ratios
+                            .insert(ConstraintRatio::Golden);
+                    } else {
+                        appwindow
+                            .engine_config()
+                            .write()
+                            .pens_config
+                            .shaper_config
+                            .constraints
+                            .ratios
+                            .remove(&ConstraintRatio::Golden);
+                    }
+                }
+            ));
     }
 
-    pub(crate) fn refresh_ui(&self, active_tab: &RnCanvasWrapper) {
+    pub(crate) fn refresh_ui(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
 
-        let shaper_config = active_tab
-            .canvas()
-            .engine_ref()
+        let shaper_config = appwindow
+            .engine_config()
+            .read()
             .pens_config
             .shaper_config
             .clone();
@@ -352,12 +588,24 @@ impl RnShaperPage {
         // builder type
         self.set_shapebuildertype(shaper_config.builder_type);
 
+        // Smooth style
+        imp.smoothstyle_line_cap_row
+            .set_selected(shaper_config.smooth_options.line_cap.to_u32().unwrap());
+        imp.smoothstyle_line_style_row
+            .set_selected(shaper_config.smooth_options.line_style.to_u32().unwrap());
+
         // Rough style
         self.set_roughstyle_fillstyle(shaper_config.rough_options.fill_style);
         imp.roughstyle_hachure_angle_row
             .set_value(shaper_config.rough_options.hachure_angle.to_degrees());
 
-        // constraints
+        // Highlighter opacity
+        imp.highlight_mode_row
+            .set_active(shaper_config.highlight_mode);
+        imp.highlight_opacity_row
+            .set_value((shaper_config.highlight_opacity * 100.0).round());
+
+        // Constraints
         imp.constraint_enabled_row
             .set_active(shaper_config.constraints.enabled);
         imp.constraint_one_to_one_row.set_active(

@@ -3,12 +3,12 @@ use super::penshortcutmodels::{
     ChangePenStyleIconFactory, ChangePenStyleListFactory, ChangePenStyleListModel,
 };
 use adw::{prelude::*, subclass::prelude::*};
-use gtk4::{glib, glib::clone, glib::subclass::*, CompositeTemplate, DropDown};
+use gtk4::{CompositeTemplate, DropDown, ListBoxRow, Widget, glib, glib::clone, glib::subclass::*};
 use num_traits::ToPrimitive;
 use once_cell::sync::Lazy;
+use rnote_engine::pens::PenStyle;
 use rnote_engine::pens::shortcuts::ShortcutAction;
 use rnote_engine::pens::shortcuts::ShortcutMode;
-use rnote_engine::pens::PenStyle;
 use std::cell::RefCell;
 
 mod imp {
@@ -77,24 +77,32 @@ mod imp {
                 row.emit_by_name::<()>("action-changed", &[]);
             });
 
-            self.mode_dropdown.get().connect_selected_notify(
-                clone!(@weak obj as penshortcutrow => move |_| {
+            self.mode_dropdown.get().connect_selected_notify(clone!(
+                #[weak(rename_to=penshortcutrow)]
+                obj,
+                move |_| {
                     match &mut *penshortcutrow.imp().action.borrow_mut() {
                         ShortcutAction::ChangePenStyle { mode, .. } => {
                             *mode = penshortcutrow.shortcut_mode();
                         }
                     }
                     penshortcutrow.emit_by_name::<()>("action-changed", &[]);
-                }),
-            );
+                }
+            ));
 
             obj.connect_local(
                 "action-changed",
                 false,
-                clone!(@weak obj as penshortcutrow => @default-return None, move |_values| {
-                    penshortcutrow.update_ui();
-                    None
-                }),
+                clone!(
+                    #[weak(rename_to=penshortcutrow)]
+                    obj,
+                    #[upgrade_or]
+                    None,
+                    move |_values| {
+                        penshortcutrow.update_ui();
+                        None
+                    }
+                ),
             );
         }
 
@@ -120,7 +128,7 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnPenShortcutRow(ObjectSubclass<imp::RnPenShortcutRow>)
-        @extends adw::ComboRow, adw::ActionRow, adw::PreferencesRow, gtk4::ListBoxRow, gtk4::Widget,
+        @extends adw::ComboRow, adw::ActionRow, adw::PreferencesRow, ListBoxRow, Widget,
         @implements gtk4::Accessible, gtk4::Actionable, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 

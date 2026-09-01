@@ -1,7 +1,8 @@
 // Imports
-use crate::render::Image;
+use crate::Image;
 use crate::{Engine, WidgetFlags};
 use p2d::bounding_volume::Aabb;
+use p2d::math::Vector2;
 use piet::RenderContext;
 use rnote_compose::color;
 use tracing::error;
@@ -17,8 +18,8 @@ impl Engine {
         {
             use crate::ext::GrapheneRectExt;
             use gtk4::{graphene, gsk, prelude::*};
-            use rnote_compose::ext::AabbExt;
             use rnote_compose::SplitOrder;
+            use rnote_compose::ext::AabbExt;
 
             let viewport = self.camera.viewport();
             let mut rendernodes: Vec<gsk::RenderNode> = vec![];
@@ -28,13 +29,15 @@ impl Engine {
                 let new_texture = match image.to_memtexture() {
                     Ok(t) => t,
                     Err(e) => {
-                        error!("Failed to generate memory-texture of background tile image, Err: {e:?}");
+                        error!(
+                            "Failed to generate memory-texture of background tile image, Err: {e:?}"
+                        );
                         return widget_flags;
                     }
                 };
 
                 for split_bounds in viewport.split_extended_origin_aligned(
-                    self.document.background.tile_size(),
+                    self.document.config.background.tile_size(),
                     SplitOrder::default(),
                 ) {
                     rendernodes.push(
@@ -73,8 +76,7 @@ impl Engine {
                     gsk::TextureNode::new(
                         &new_texture,
                         &graphene::Rect::from_p2d_aabb(
-                            origin_indicator_bounds()
-                                .scaled(&na::Vector2::repeat(1.0 / total_zoom)),
+                            origin_indicator_bounds().scaled(Vector2::splat(1.0 / total_zoom)),
                         ),
                     )
                     .upcast(),
@@ -128,7 +130,7 @@ impl Engine {
         let image_scale = self.camera.image_scale();
         let scale_factor = self.camera.scale_factor();
 
-        match self.document.background.gen_tile_image(image_scale) {
+        match self.document.config.background.gen_tile_image(image_scale) {
             Ok(image) => {
                 self.background_tile_image = Some(image);
             }
@@ -163,7 +165,7 @@ impl Engine {
     ) -> anyhow::Result<()> {
         use crate::drawable::DrawableOnDoc;
         use crate::engine::visual_debug;
-        use crate::engine::EngineView;
+        use crate::engine_view;
         use gtk4::prelude::*;
 
         let doc_bounds = self.document.bounds();
@@ -190,19 +192,10 @@ impl Engine {
                    self.camera.image_scale(),
                );
         */
-        self.penholder.draw_on_doc_to_gtk_snapshot(
-            snapshot,
-            &EngineView {
-                tasks_tx: self.engine_tasks_tx(),
-                pens_config: &self.pens_config,
-                document: &self.document,
-                store: &self.store,
-                camera: &self.camera,
-                audioplayer: &self.audioplayer,
-            },
-        )?;
+        self.penholder
+            .draw_on_doc_to_gtk_snapshot(snapshot, &engine_view!(self))?;
 
-        if self.visual_debug {
+        if self.config.read().visual_debug {
             snapshot.save();
             snapshot.transform(Some(&camera_transform));
             visual_debug::draw_stroke_debug_to_gtk_snapshot(snapshot, self, surface_bounds)?;
@@ -216,8 +209,8 @@ impl Engine {
 
     #[cfg(feature = "ui")]
     fn draw_document_shadow_to_gtk_snapshot(&self, snapshot: &gtk4::Snapshot) {
-        use crate::ext::{GdkRGBAExt, GrapheneRectExt};
         use crate::Document;
+        use crate::ext::{GdkRGBAExt, GrapheneRectExt};
         use gtk4::{gdk, graphene, gsk, prelude::*};
 
         let shadow_width = Document::SHADOW_WIDTH;
@@ -257,7 +250,7 @@ impl Engine {
         // Fill with background color just in case there is any space left between the tiles
         snapshot.append_node(
             gsk::ColorNode::new(
-                &gdk::RGBA::from_compose_color(self.document.background.color),
+                &gdk::RGBA::from_compose_color(self.document.config.background.color),
                 //&gdk::RGBA::RED,
                 &graphene::Rect::from_p2d_aabb(doc_bounds),
             )
@@ -277,10 +270,10 @@ impl Engine {
         use crate::ext::{GdkRGBAExt, GrapheneRectExt};
         use gtk4::{gdk, graphene, gsk, prelude::*};
         use p2d::bounding_volume::BoundingVolume;
-        use rnote_compose::ext::AabbExt;
         use rnote_compose::SplitOrder;
+        use rnote_compose::ext::AabbExt;
 
-        if self.document.format.show_borders {
+        if self.document.config.format.show_borders {
             let total_zoom = self.camera.total_zoom();
             let border_width = 1.0 / total_zoom;
             let viewport = self.camera.viewport();
@@ -288,9 +281,10 @@ impl Engine {
 
             snapshot.push_clip(&graphene::Rect::from_p2d_aabb(doc_bounds.loosened(2.0)));
 
-            for page_bounds in doc_bounds
-                .split_extended_origin_aligned(self.document.format.size(), SplitOrder::default())
-            {
+            for page_bounds in doc_bounds.split_extended_origin_aligned(
+                self.document.config.format.size(),
+                SplitOrder::default(),
+            ) {
                 if !page_bounds.intersects(&viewport) {
                     continue;
                 }
@@ -312,10 +306,10 @@ impl Engine {
                         border_width as f32,
                     ],
                     &[
-                        gdk::RGBA::from_compose_color(self.document.format.border_color),
-                        gdk::RGBA::from_compose_color(self.document.format.border_color),
-                        gdk::RGBA::from_compose_color(self.document.format.border_color),
-                        gdk::RGBA::from_compose_color(self.document.format.border_color),
+                        gdk::RGBA::from_compose_color(self.document.config.format.border_color),
+                        gdk::RGBA::from_compose_color(self.document.config.format.border_color),
+                        gdk::RGBA::from_compose_color(self.document.config.format.border_color),
+                        gdk::RGBA::from_compose_color(self.document.config.format.border_color),
                     ],
                 )
             }
@@ -334,10 +328,10 @@ impl Engine {
     ) -> anyhow::Result<()> {
         use gtk4::prelude::*;
 
-        if self.document.format.show_origin_indicator {
-            if let Some(r) = &self.origin_indicator_rendernode {
-                snapshot.append_node(r);
-            }
+        if self.document.config.format.show_origin_indicator
+            && let Some(r) = &self.origin_indicator_rendernode
+        {
+            snapshot.append_node(r);
         }
 
         Ok(())
@@ -346,8 +340,8 @@ impl Engine {
 
 /// Origin indicator bounds in document coordinate space.
 fn origin_indicator_bounds() -> Aabb {
-    const SIZE: na::Vector2<f64> = na::vector![17., 17.];
-    Aabb::from_half_extents(na::Vector2::zeros().into(), SIZE * 0.5)
+    const SIZE: Vector2 = Vector2::splat(17.);
+    Aabb::from_half_extents(Vector2::ZERO, SIZE * 0.5)
 }
 
 fn gen_origin_indicator_image(scale_factor: f64) -> anyhow::Result<Image> {

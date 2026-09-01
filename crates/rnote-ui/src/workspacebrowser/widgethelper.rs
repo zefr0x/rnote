@@ -1,7 +1,7 @@
 // Imports
 use gettextrs::gettext;
 use gtk4::{
-    glib, glib::clone, prelude::*, Align, Button, Entry, Grid, Label, Popover, PositionType,
+    Align, Button, Entry, Grid, Label, Popover, PositionType, glib, glib::clone, prelude::*,
 };
 
 /// A template-function to create a simple dialog widget for an action:
@@ -49,9 +49,22 @@ pub(crate) fn create_entry_dialog(entry: &Entry, label: &Label) -> (Button, Popo
         .build();
     popover.set_child(Some(&grid));
 
-    cancel_button.connect_clicked(clone!(@weak popover => move |_| {
-        popover.popdown();
-    }));
+    cancel_button.connect_clicked(clone!(
+        #[weak]
+        popover,
+        move |_| {
+            popover.popdown();
+        }
+    ));
+
+    // listen for enter key on entry
+    entry.connect_activate(clone!(
+        #[weak]
+        apply_button,
+        move |_| {
+            apply_button.emit_clicked();
+        }
+    ));
 
     (apply_button, popover)
 }

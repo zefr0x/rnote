@@ -1,16 +1,22 @@
 // Imports
 use crate::document::background;
 use crate::engine::import::XoppImportPrefs;
-use crate::fileformats::{rnoteformat, xoppformat, FileFormatLoader};
+use crate::fileformats::{FileFormatLoader, rnoteformat, xoppformat};
 use crate::store::{ChronoComponent, StrokeKey};
 use crate::strokes::Stroke;
 use crate::{Camera, Document, Engine};
 use anyhow::Context;
 use futures::channel::oneshot;
+use p2d::math::Vector2;
 use serde::{Deserialize, Serialize};
-use slotmap::{HopSlotMap, SecondaryMap};
+use slotmap::{SecondaryMap, SlotMap};
 use std::sync::Arc;
 use tracing::error;
+
+/// Trait for types which hold configuration needed for engine snapshots
+pub trait Snapshotable {
+    fn extract_snapshot_data(&self) -> Self;
+}
 
 // An engine snapshot, used when loading/saving the current document from/into a file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,7 +27,7 @@ pub struct EngineSnapshot {
     #[serde(rename = "camera")]
     pub camera: Camera,
     #[serde(rename = "stroke_components")]
-    pub stroke_components: Arc<HopSlotMap<StrokeKey, Arc<Stroke>>>,
+    pub stroke_components: Arc<SlotMap<StrokeKey, Arc<Stroke>>>,
     #[serde(rename = "chrono_components")]
     pub chrono_components: Arc<SecondaryMap<StrokeKey, Arc<ChronoComponent>>>,
     #[serde(rename = "chrono_counter")]
@@ -33,7 +39,7 @@ impl Default for EngineSnapshot {
         Self {
             document: Document::default(),
             camera: Camera::default(),
-            stroke_components: Arc::new(HopSlotMap::with_key()),
+            stroke_components: Arc::new(SlotMap::with_key()),
             chrono_components: Arc::new(SecondaryMap::new()),
             chrono_counter: 0,
         }
@@ -82,16 +88,18 @@ impl EngineSnapshot {
                     .pages
                     .iter()
                     .map(|page| (page.width, page.height))
-                    .fold((0_f64, 0_f64), |prev, next| {
-                        // Max of width, sum heights
-                        (prev.0.max(next.0), prev.1 + next.1)
-                    });
+                    .fold(
+                        (0_f64, 0_f64),
+                        |(prev_width, prev_height), (next_width, next_height)| {
+                            (prev_width.max(next_width), prev_height + next_height)
+                        },
+                    );
                 let no_pages = xopp_file.xopp_root.pages.len() as u32;
 
                 let mut engine = Engine::default();
 
                 // We convert all values from the hardcoded 72 DPI of Xopp files to the preferred dpi
-                engine.document.format.set_dpi(xopp_import_prefs.dpi);
+                engine.document.config.format.set_dpi(xopp_import_prefs.dpi);
 
                 engine.document.x = 0.0;
                 engine.document.y = 0.0;
@@ -108,6 +116,7 @@ impl EngineSnapshot {
 
                 engine
                     .document
+                    .config
                     .format
                     .set_width(crate::utils::convert_value_dpi(
                         doc_width,
@@ -116,6 +125,7 @@ impl EngineSnapshot {
                     ));
                 engine
                     .document
+                    .config
                     .format
                     .set_height(crate::utils::convert_value_dpi(
                         doc_height / (no_pages as f64),
@@ -123,19 +133,18 @@ impl EngineSnapshot {
                         xopp_import_prefs.dpi,
                     ));
 
-                if let Some(first_page) = xopp_file.xopp_root.pages.first() {
-                    if let xoppformat::XoppBackgroundType::Solid {
+                if let Some(first_page) = xopp_file.xopp_root.pages.first()
+                    && let xoppformat::XoppBackgroundType::Solid {
                         color: _color,
                         style: _style,
                     } = &first_page.background.bg_type
-                    {
-                        // Xopp background styles are not compatible with Rnotes, so everything is plain for now
-                        engine.document.background.pattern = background::PatternStyle::None;
-                    }
+                {
+                    // Xopp background styles are not compatible with Rnotes, so everything is plain for now
+                    engine.document.config.background.pattern = background::PatternStyle::None;
                 }
 
                 // Offsetting as rnote has one global coordinate space
-                let mut offset = na::Vector2::<f64>::zeros();
+                let mut offset = Vector2::ZERO;
 
                 for page in xopp_file.xopp_root.pages.into_iter() {
                     for layers in page.layers.into_iter() {
@@ -174,6 +183,20 @@ impl EngineSnapshot {
                                 }
                             }
                         }
+
+                        for new_xopptext in layers.texts.into_iter() {
+                            match Stroke::from_xopptext(new_xopptext, offset, xopp_import_prefs.dpi)
+                            {
+                                Ok(new_text) => {
+                                    engine.store.insert_stroke(new_text, None);
+                                }
+                                Err(e) => {
+                                    error!(
+                                        "Creating Stroke from XoppText failed while loading Xopp bytes, Err: {e:?}",
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     // Only add to y offset, results in vertical pages
@@ -188,7 +211,9 @@ impl EngineSnapshot {
             };
 
             if snapshot_sender.send(result()).is_err() {
-                error!("Sending result to receiver while loading Xopp bytes failed. Receiver already dropped");
+                error!(
+                    "Sending result to receiver while loading Xopp bytes failed. Receiver already dropped"
+                );
             }
         });
 

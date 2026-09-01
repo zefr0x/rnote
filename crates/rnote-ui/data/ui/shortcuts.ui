@@ -41,6 +41,12 @@
             </child>
             <child>
               <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Toggle Tabs Overview</property>
+                <property name="accelerator">&lt;ctrl&gt;&lt;shift&gt;o</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Open the Canvas-Menu</property>
                 <property name="accelerator">F9</property>
               </object>
@@ -96,6 +102,12 @@
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Switch to the 'Tools'</property>
                 <property name="accelerator">&lt;ctrl&gt;6</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Select Color</property>
+                <property name="accelerator">&lt;ctrl&gt;KP_1 &lt;ctrl&gt;KP_9</property>
               </object>
             </child>
           </object>
@@ -207,7 +219,25 @@
             <child>
               <object class="GtkShortcutsShortcut">
                 <property name="title" translatable="yes">Import File</property>
+                <property name="accelerator">&lt;ctrl&gt;&lt;shift&gt;i</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Bold</property>
+                <property name="accelerator">&lt;ctrl&gt;b</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Italic</property>
                 <property name="accelerator">&lt;ctrl&gt;i</property>
+              </object>
+            </child>
+            <child>
+              <object class="GtkShortcutsShortcut">
+                <property name="title" translatable="yes">Underline</property>
+                <property name="accelerator">&lt;ctrl&gt;u</property>
               </object>
             </child>
             <child>

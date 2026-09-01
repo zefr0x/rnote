@@ -2,31 +2,31 @@
 mod canvaslayout;
 pub(crate) mod imexport;
 mod input;
-mod widgetflagsboxed;
 
 // Re-exports
 pub(crate) use canvaslayout::RnCanvasLayout;
-pub(crate) use widgetflagsboxed::WidgetFlagsBoxed;
+pub(crate) use input::reject_pointer_input;
 
 // Imports
-use crate::{config, RnAppWindow};
+use crate::boxed::WidgetFlagsBoxed;
+use crate::{RnAppWindow, config, env};
 use futures::StreamExt;
 use gettextrs::gettext;
 use gtk4::{
-    gdk, gio, glib, glib::clone, graphene, prelude::*, subclass::prelude::*, Adjustment,
-    DropTarget, EventControllerKey, EventControllerLegacy, IMMulticontext, PropagationPhase,
-    Scrollable, ScrollablePolicy, Widget,
+    Adjustment, DropTarget, EventControllerKey, EventControllerLegacy, IMMulticontext,
+    PropagationPhase, Scrollable, ScrollablePolicy, ScrolledWindow, Widget, gdk, gio, glib,
+    glib::clone, graphene, prelude::*, subclass::prelude::*,
 };
-use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
 use notify::EventKind;
-use notify_debouncer_full::notify::{self, Watcher};
+use notify::event::{AccessKind, AccessMode, ModifyKind, RenameMode};
+use notify_debouncer_full::notify;
 use once_cell::sync::Lazy;
 use p2d::bounding_volume::Aabb;
+use p2d::math::Vector2;
 use rnote_compose::ext::AabbExt;
 use rnote_compose::penevent::PenState;
 use rnote_engine::ext::GraphenePointExt;
 use rnote_engine::ext::GrapheneRectExt;
-use rnote_engine::Camera;
 use rnote_engine::{Engine, WidgetFlags};
 use std::cell::{Cell, Ref, RefCell, RefMut};
 use std::path::Path;
@@ -37,8 +37,11 @@ use tracing::{debug, error, warn};
 struct Connections {
     hadjustment: Option<glib::SignalHandlerId>,
     vadjustment: Option<glib::SignalHandlerId>,
+    hadjustment_upper: Option<glib::SignalHandlerId>,
+    vadjustment_upper: Option<glib::SignalHandlerId>,
     tab_page_output_file: Option<glib::Binding>,
     tab_page_unsaved_changes: Option<glib::Binding>,
+    tab_page_invalidate_thumbnail: Option<glib::SignalHandlerId>,
     appwindow_output_file: Option<glib::SignalHandlerId>,
     appwindow_scalefactor: Option<glib::SignalHandlerId>,
     appwindow_save_in_progress: Option<glib::SignalHandlerId>,
@@ -59,6 +62,7 @@ mod imp {
         pub(super) connections: RefCell<Connections>,
         pub(crate) hadjustment: RefCell<Option<Adjustment>>,
         pub(crate) vadjustment: RefCell<Option<Adjustment>>,
+        pub(crate) workaround_kinetic_scrolling_pending: Cell<bool>,
         pub(crate) hscroll_policy: Cell<ScrollablePolicy>,
         pub(crate) vscroll_policy: Cell<ScrollablePolicy>,
         pub(crate) regular_cursor_icon_name: RefCell<String>,
@@ -74,6 +78,7 @@ mod imp {
 
         pub(crate) engine: RefCell<Engine>,
         pub(crate) engine_task_handler_handle: RefCell<Option<glib::JoinHandle<()>>>,
+        pub(crate) animation_callback_id: RefCell<Option<gtk4::TickCallbackId>>,
 
         pub(crate) output_file: RefCell<Option<gio::File>>,
         pub(crate) output_file_watcher_task: RefCell<Option<glib::JoinHandle<()>>>,
@@ -152,6 +157,7 @@ mod imp {
 
                 hadjustment: RefCell::new(None),
                 vadjustment: RefCell::new(None),
+                workaround_kinetic_scrolling_pending: Cell::new(false),
                 hscroll_policy: Cell::new(ScrollablePolicy::Minimum),
                 vscroll_policy: Cell::new(ScrollablePolicy::Minimum),
                 regular_cursor: RefCell::new(regular_cursor),
@@ -167,6 +173,7 @@ mod imp {
 
                 engine: RefCell::new(engine),
                 engine_task_handler_handle: RefCell::new(None),
+                animation_callback_id: RefCell::new(None),
 
                 output_file: RefCell::new(None),
                 output_file_watcher_task: RefCell::new(None),
@@ -218,10 +225,14 @@ mod imp {
             obj.add_controller(self.drop_target.clone());
 
             // receive and handle engine tasks
-            let engine_task_handler_handle = glib::spawn_future_local(
-                clone!(@weak obj as canvas => async move {
+            let engine_task_handler_handle = glib::spawn_future_local(clone!(
+                #[weak(rename_to=canvas)]
+                obj,
+                async move {
                     let Some(mut task_rx) = canvas.engine_mut().take_engine_tasks_rx() else {
-                        error!("Installing the engine task handler failed, taken tasks_rx is None.");
+                        error!(
+                            "Installing the engine task handler failed, taken tasks_rx is None."
+                        );
                         return;
                     };
 
@@ -235,10 +246,33 @@ mod imp {
                             }
                         }
                     }
-                }),
-            );
+                }
+            ));
 
             *self.engine_task_handler_handle.borrow_mut() = Some(engine_task_handler_handle);
+
+            let animation_callback_id = obj.add_tick_callback(clone!(
+                #[weak(rename_to=canvas)]
+                obj,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move |_widget, _frame_clock| {
+                    if canvas.engine_mut().animation.process_frame() {
+                        let optimize_epd = canvas.engine_ref().optimize_epd();
+                        canvas.engine_mut().handle_animation_frame();
+
+                        // if optimize_epd is enabled, we only redraw the canvas
+                        // when no follow-up frame has been requested (i.e. the animation is done)
+                        if !optimize_epd || !canvas.engine_ref().animation.frame_in_flight() {
+                            canvas.queue_draw();
+                        }
+                    }
+
+                    glib::ControlFlow::Continue
+                }
+            ));
+
+            *self.animation_callback_id.borrow_mut() = Some(animation_callback_id);
 
             self.setup_input();
         }
@@ -417,9 +451,12 @@ mod imp {
 
         fn signals() -> &'static [glib::subclass::Signal] {
             static SIGNALS: Lazy<Vec<glib::subclass::Signal>> = Lazy::new(|| {
-                vec![glib::subclass::Signal::builder("handle-widget-flags")
-                    .param_types([WidgetFlagsBoxed::static_type()])
-                    .build()]
+                vec![
+                    glib::subclass::Signal::builder("handle-widget-flags")
+                        .param_types([WidgetFlagsBoxed::static_type()])
+                        .build(),
+                    glib::subclass::Signal::builder("invalidate-thumbnail").build(),
+                ]
             });
             SIGNALS.as_ref()
         }
@@ -437,8 +474,8 @@ mod imp {
                         parent
                             .compute_point(&*obj, &graphene::Point::zero())
                             .unwrap()
-                            .to_na_point(),
-                        na::point![f64::from(parent.width()), f64::from(parent.height())],
+                            .to_p2d_vec(),
+                        Vector2::new(parent.width() as f64, parent.height() as f64),
                     )
                 } else {
                     obj.bounds()
@@ -468,120 +505,218 @@ mod imp {
 
             // Pointer controller
             let pen_state = Cell::new(PenState::Up);
-            self.pointer_controller.connect_event(clone!(@strong pen_state, @weak obj as canvas => @default-return glib::Propagation::Proceed, move |_, event| {
-                let (propagation, new_state) = super::input::handle_pointer_controller_event(&canvas, event, pen_state.get());
-                pen_state.set(new_state);
-                propagation
-            }));
+            self.pointer_controller.connect_event(clone!(
+                #[strong]
+                pen_state,
+                #[weak(rename_to=canvas)]
+                obj,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, event| {
+                    let (propagation, new_state) = super::input::handle_pointer_controller_event(
+                        &canvas,
+                        event,
+                        pen_state.get(),
+                    );
+                    pen_state.set(new_state);
+                    propagation
+                }
+            ));
 
             // For unicode text the input is committed from the IM context, and won't trigger the key_pressed signal
-            self.key_controller_im_context.connect_commit(
-                clone!(@weak obj as canvas => move |_cx, text| {
+            self.key_controller_im_context.connect_commit(clone!(
+                #[weak(rename_to=canvas)]
+                obj,
+                move |_cx, text| {
                     super::input::handle_imcontext_text_commit(&canvas, text);
-                }),
-            );
+                }
+            ));
 
             // Key controller
-            self.key_controller.connect_key_pressed(clone!(@weak obj as canvas => @default-return glib::Propagation::Proceed, move |_, key, _raw, modifier| {
-                super::input::handle_key_controller_key_pressed(&canvas, key, modifier)
-            }));
+            self.key_controller.connect_key_pressed(clone!(
+                #[weak(rename_to=canvas)]
+                obj,
+                #[upgrade_or]
+                glib::Propagation::Proceed,
+                move |_, key, _raw, modifier| {
+                    super::input::handle_key_controller_key_pressed(&canvas, key, modifier)
+                }
+            ));
 
-            self.key_controller.connect_key_released(
-                clone!(@weak obj as canvas => move |_key_controller, key, _raw, modifier| {
+            self.key_controller.connect_key_released(clone!(
+                #[weak(rename_to=canvas)]
+                obj,
+                move |_key_controller, key, _raw, modifier| {
                     super::input::handle_key_controller_key_released(&canvas, key, modifier)
-                }),
-            );
+                }
+            ));
         }
 
         fn set_hadjustment_prop(&self, hadj: Option<Adjustment>) {
             let obj = self.obj();
+            let scroller = obj
+                .parent()
+                .and_then(|parent| parent.downcast::<ScrolledWindow>().ok());
 
-            let hadj_value = self
-                .hadjustment
-                .borrow()
-                .as_ref()
-                .map(|adj| adj.value())
-                .unwrap_or(-Camera::OVERSHOOT_HORIZONTAL);
-            let vadj_value = self
-                .vadjustment
-                .borrow()
-                .as_ref()
-                .map(|adj| adj.value())
-                .unwrap_or(-Camera::OVERSHOOT_VERTICAL);
             let widget_size = obj.widget_size();
-            let offset_mins_maxs = obj.engine_ref().camera_offset_mins_maxs();
+            let offset = obj.engine_ref().camera.offset();
+
+            let (surface_mins, surface_maxs) = obj.engine_ref().camera_surface_mins_maxs();
+            let adjustment_maxs =
+                super::RnCanvas::surface_to_adjustment(surface_maxs, surface_mins);
+            let adjustment_value = super::RnCanvas::surface_to_adjustment(offset, surface_mins);
 
             if let Some(signal_id) = self.connections.borrow_mut().hadjustment.take() {
                 let old_adj = self.hadjustment.borrow().as_ref().unwrap().clone();
                 old_adj.disconnect(signal_id);
             }
+            if let Some(signal_id) = self.connections.borrow_mut().hadjustment_upper.take() {
+                let old_adj = self.hadjustment.borrow().as_ref().unwrap().clone();
+                old_adj.disconnect(signal_id);
+            }
 
             if let Some(ref hadj) = hadj {
-                let signal_id =
-                    hadj.connect_value_changed(clone!(@weak obj as canvas => move |_| {
-                        // this triggers a canvaslayout allocate() call,
-                        // where the camera and content rendering is updated based on some conditions
-                        canvas.queue_resize();
-                    }));
+                let upper_signal_id = hadj.connect_notify_local(
+                    Some("upper"),
+                    clone!(
+                        #[weak(rename_to=canvas)]
+                        obj,
+                        #[strong]
+                        scroller,
+                        move |_adj: &Adjustment, _| {
+                            // restore kinetic scrolling after the canvas has been resized,
+                            // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/1494
+                            canvas.workaround_restore_kinetic_scrolling(scroller.as_ref());
+                        }
+                    ),
+                );
+
+                let signal_id = hadj.connect_value_changed(clone!(
+                    #[weak(rename_to=canvas)]
+                    obj,
+                    #[strong]
+                    scroller,
+                    move |hadj_signal| {
+                        // Apply scroll input from adjustment to camera
+                        let (surface_mins, _) = canvas.engine_ref().camera_surface_mins_maxs();
+                        let offset = canvas.engine_ref().camera.offset();
+
+                        let new_offset = Vector2::new(
+                            super::RnCanvas::adjustment_to_surface(
+                                hadj_signal.value(),
+                                surface_mins.x,
+                            ),
+                            offset.y,
+                        );
+
+                        let widget_flags = canvas.engine_mut().camera_set_offset_expand(new_offset);
+
+                        if widget_flags.resize {
+                            // disable kinetic scrolling when the canvas is about to resize (i.e. when it was expanded),
+                            // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/1494
+                            canvas.workaround_disable_kinetic_scrolling(scroller.as_ref());
+                        }
+
+                        canvas.emit_handle_widget_flags(widget_flags);
+                    }
+                ));
 
                 self.connections.borrow_mut().hadjustment.replace(signal_id);
+                self.connections
+                    .borrow_mut()
+                    .hadjustment_upper
+                    .replace(upper_signal_id);
             }
             self.hadjustment.replace(hadj);
 
-            obj.configure_adjustments(
-                widget_size,
-                offset_mins_maxs,
-                na::vector![hadj_value, vadj_value],
-            );
+            obj.configure_adjustments(widget_size, adjustment_maxs, adjustment_value);
         }
 
         fn set_vadjustment_prop(&self, vadj: Option<Adjustment>) {
             let obj = self.obj();
+            let scroller = obj
+                .parent()
+                .and_then(|parent| parent.downcast::<ScrolledWindow>().ok());
 
-            let hadj_value = self
-                .hadjustment
-                .borrow()
-                .as_ref()
-                .map(|adj| adj.value())
-                .unwrap_or(-Camera::OVERSHOOT_HORIZONTAL);
-            let vadj_value = self
-                .vadjustment
-                .borrow()
-                .as_ref()
-                .map(|adj| adj.value())
-                .unwrap_or(-Camera::OVERSHOOT_VERTICAL);
             let widget_size = obj.widget_size();
-            let offset_mins_maxs = obj.engine_ref().camera_offset_mins_maxs();
+            let offset = obj.engine_ref().camera.offset();
+
+            let (surface_mins, surface_maxs) = obj.engine_ref().camera_surface_mins_maxs();
+            let adjustment_maxs =
+                super::RnCanvas::surface_to_adjustment(surface_maxs, surface_mins);
+            let adjustment_value = super::RnCanvas::surface_to_adjustment(offset, surface_mins);
 
             if let Some(signal_id) = self.connections.borrow_mut().vadjustment.take() {
                 let old_adj = self.vadjustment.borrow().as_ref().unwrap().clone();
                 old_adj.disconnect(signal_id);
             }
+            if let Some(signal_id) = self.connections.borrow_mut().vadjustment_upper.take() {
+                let old_adj = self.vadjustment.borrow().as_ref().unwrap().clone();
+                old_adj.disconnect(signal_id);
+            }
 
             if let Some(ref vadj) = vadj {
-                let signal_id =
-                    vadj.connect_value_changed(clone!(@weak obj as canvas => move |_| {
-                        // this triggers a canvaslayout allocate() call,
-                        // where the camera and content rendering is updated based on some conditions
-                        canvas.queue_resize();
-                    }));
+                let upper_signal_id = vadj.connect_notify_local(
+                    Some("upper"),
+                    clone!(
+                        #[weak(rename_to=canvas)]
+                        obj,
+                        #[strong]
+                        scroller,
+                        move |_adj: &Adjustment, _| {
+                            // restore kinetic scrolling after the canvas has been resized,
+                            // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/1494
+                            canvas.workaround_restore_kinetic_scrolling(scroller.as_ref());
+                        }
+                    ),
+                );
+
+                let signal_id = vadj.connect_value_changed(clone!(
+                    #[weak(rename_to=canvas)]
+                    obj,
+                    #[strong]
+                    scroller,
+                    move |vadj_signal| {
+                        // Apply scroll input from adjustment to camera
+                        let (surface_mins, _) = canvas.engine_ref().camera_surface_mins_maxs();
+                        let offset = canvas.engine_ref().camera.offset();
+
+                        let new_offset = Vector2::new(
+                            offset.x,
+                            super::RnCanvas::adjustment_to_surface(
+                                vadj_signal.value(),
+                                surface_mins.y,
+                            ),
+                        );
+
+                        let widget_flags = canvas.engine_mut().camera_set_offset_expand(new_offset);
+
+                        if widget_flags.resize {
+                            // disable kinetic scrolling when the canvas is about to resize (i.e. when it was expanded),
+                            // workaround for https://gitlab.gnome.org/GNOME/gtk/-/issues/1494
+                            canvas.workaround_disable_kinetic_scrolling(scroller.as_ref());
+                        }
+
+                        canvas.emit_handle_widget_flags(widget_flags);
+                    }
+                ));
 
                 self.connections.borrow_mut().vadjustment.replace(signal_id);
+                self.connections
+                    .borrow_mut()
+                    .vadjustment_upper
+                    .replace(upper_signal_id);
             }
             self.vadjustment.replace(vadj);
 
-            obj.configure_adjustments(
-                widget_size,
-                offset_mins_maxs,
-                na::vector![hadj_value, vadj_value],
-            );
+            obj.configure_adjustments(widget_size, adjustment_maxs, adjustment_value);
         }
     }
 }
 
 glib::wrapper! {
     pub(crate) struct RnCanvas(ObjectSubclass<imp::RnCanvas>)
-        @extends gtk4::Widget,
+        @extends Widget,
         @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget, gtk4::Scrollable;
 }
 
@@ -630,6 +765,9 @@ impl RnCanvas {
     }
 
     #[allow(unused)]
+    /// Sets the internal output file of the canvas, note that this will
+    /// cause the file watcher task to either be stopped if `output_file` is
+    /// set to `None` or be replaced if set to `Some(...)`.
     pub(crate) fn set_output_file(&self, output_file: Option<gio::File>) {
         self.set_property("output-file", output_file.to_value());
     }
@@ -712,6 +850,10 @@ impl RnCanvas {
         );
     }
 
+    pub(super) fn emit_invalidate_thumbnail(&self) {
+        self.emit_by_name::<()>("invalidate-thumbnail", &[]);
+    }
+
     pub(crate) fn last_export_dir(&self) -> Option<gio::File> {
         self.imp().last_export_dir.borrow().clone()
     }
@@ -726,20 +868,34 @@ impl RnCanvas {
             .unwrap()
     }
 
+    #[inline]
+    pub(crate) fn surface_to_adjustment<T>(offset: T, surface_min: T) -> T
+    where
+        T: std::ops::Sub<Output = T>,
+    {
+        offset - surface_min
+    }
+
+    #[inline]
+    pub(crate) fn adjustment_to_surface<T>(offset: T, surface_min: T) -> T
+    where
+        T: std::ops::Add<Output = T>,
+    {
+        offset + surface_min
+    }
+
     pub(crate) fn configure_adjustments(
         &self,
-        widget_size: na::Vector2<f64>,
-        offset_mins_maxs: (na::Vector2<f64>, na::Vector2<f64>),
-        offset: na::Vector2<f64>,
+        widget_size: Vector2,
+        adjustment_upper: Vector2,
+        adjustment_value: Vector2,
     ) {
-        let (offset_mins, offset_maxs) = offset_mins_maxs;
-
         if let Some(hadj) = self.hadjustment() {
             hadj.configure(
                 // This gets clamped to the lower and upper values
-                offset[0],
-                offset_mins[0],
-                offset_maxs[0],
+                adjustment_value[0],
+                0.0,
+                adjustment_upper[0].max(widget_size[0]),
                 0.1 * widget_size[0],
                 0.9 * widget_size[0],
                 widget_size[0],
@@ -749,9 +905,9 @@ impl RnCanvas {
         if let Some(vadj) = self.vadjustment() {
             vadj.configure(
                 // This gets clamped to the lower and upper values
-                offset[1],
-                offset_mins[1],
-                offset_maxs[1],
+                adjustment_value[1],
+                0.0,
+                adjustment_upper[1].max(widget_size[1]),
                 0.1 * widget_size[1],
                 0.9 * widget_size[1],
                 widget_size[1],
@@ -761,17 +917,39 @@ impl RnCanvas {
         self.queue_resize();
     }
 
-    pub(crate) fn widget_size(&self) -> na::Vector2<f64> {
-        na::vector![self.width() as f64, self.height() as f64]
+    pub(crate) fn workaround_disable_kinetic_scrolling(&self, scroller: Option<&ScrolledWindow>) {
+        // Only intervene when kinetic scrolling is currently enabled.
+        // If we disable it here, record that this workaround changed the state using the pending flag.
+        if let Some(scroller) = scroller
+            && scroller.is_kinetic_scrolling()
+        {
+            scroller.set_kinetic_scrolling(false);
+            self.imp().workaround_kinetic_scrolling_pending.set(true);
+        }
+    }
+
+    pub(crate) fn workaround_restore_kinetic_scrolling(&self, scroller: Option<&ScrolledWindow>) {
+        // The pending flag is set to true only if we disabled kinetic scrolling before.
+        // This avoids forcing kinetic scrolling on for scrollers that started with it being disabled.
+        if self.imp().workaround_kinetic_scrolling_pending.get()
+            && let Some(scroller) = scroller
+        {
+            scroller.set_kinetic_scrolling(true);
+            self.imp().workaround_kinetic_scrolling_pending.set(false);
+        }
+    }
+
+    pub(crate) fn widget_size(&self) -> Vector2 {
+        Vector2::new(self.width() as f64, self.height() as f64)
     }
 
     /// Immutable borrow of the engine.
-    pub(crate) fn engine_ref(&self) -> Ref<Engine> {
+    pub(crate) fn engine_ref(&self) -> Ref<'_, Engine> {
         self.imp().engine.borrow()
     }
 
     /// Mutable borrow of the engine.
-    pub(crate) fn engine_mut(&self) -> RefMut<Engine> {
+    pub(crate) fn engine_mut(&self) -> RefMut<'_, Engine> {
         self.imp().engine.borrow_mut()
     }
 
@@ -796,40 +974,6 @@ impl RnCanvas {
                 .key_controller
                 .set_im_context(None::<&IMMulticontext>);
         }
-    }
-
-    pub(crate) fn save_engine_config(&self, settings: &gio::Settings) -> anyhow::Result<()> {
-        let engine_config = self.engine_ref().export_engine_config_as_json()?;
-        Ok(settings.set_string("engine-config", engine_config.as_str())?)
-    }
-
-    pub(crate) fn load_engine_config_from_settings(
-        &self,
-        settings: &gio::Settings,
-    ) -> anyhow::Result<()> {
-        // load engine config
-        let engine_config = settings.string("engine-config");
-        let widget_flags = match self
-            .engine_mut()
-            .import_engine_config_from_json(&engine_config, crate::env::pkg_data_dir().ok())
-        {
-            Err(e) => {
-                if engine_config.is_empty() {
-                    // On first app startup the engine config is empty, so we don't log an error
-                    debug!("Did not load `engine-config` from settings, was empty");
-                } else {
-                    return Err(e);
-                }
-                None
-            }
-            Ok(widget_flags) => Some(widget_flags),
-        };
-
-        // Avoiding already borrowed
-        if let Some(widget_flags) = widget_flags {
-            self.emit_handle_widget_flags(widget_flags);
-        }
-        Ok(())
     }
 
     /// Switches between the regular and the drawing cursor
@@ -895,23 +1039,37 @@ impl RnCanvas {
             canvas.set_unsaved_changes(true);
 
             appwindow.overlays().dispatch_toast_w_button_singleton(
-                        &gettext("Opened file was modified on disk"),
-                        &gettext("Reload"),
-                        clone!(@weak canvas, @weak appwindow => move |_reload_toast| {
-                            glib::spawn_future_local(clone!(@weak appwindow => async move {
+                &gettext("Opened file was modified on disk"),
+                &gettext("Reload"),
+                clone!(
+                    #[weak]
+                    canvas,
+                    #[weak]
+                    appwindow,
+                    move |_reload_toast| {
+                        glib::spawn_future_local(clone!(
+                            #[weak]
+                            appwindow,
+                            async move {
                                 appwindow.overlays().progressbar_start_pulsing();
 
                                 if let Err(e) = canvas.reload_from_disk().await {
                                     error!("Failed to reload current output file, Err: {e:?}");
-                                    appwindow.overlays().dispatch_toast_error(&gettext("Reloading .rnote file from disk failed"));
+                                    appwindow.overlays().dispatch_toast_error(&gettext(
+                                        "Reloading .rnote file from disk failed",
+                                    ));
                                     appwindow.overlays().progressbar_abort();
                                 } else {
                                     appwindow.overlays().progressbar_finish();
+                                    canvas.emit_invalidate_thumbnail();
                                 }
-                            }));
-                        }),
-                        None,
-                    &canvas.imp().output_file_modified_toast_singleton);
+                            }
+                        ));
+                    }
+                ),
+                None,
+                &canvas.imp().output_file_modified_toast_singleton,
+            );
         };
 
         let event_handler = move |appwindow: &RnAppWindow,
@@ -963,6 +1121,13 @@ impl RnCanvas {
                     if !crate::utils::paths_abs_eq(file_path, event_path).unwrap_or(false) {
                         return;
                     }
+                    if canvas.output_file_expect_write() {
+                        // On macOS, atomic file saving sometimes leads to receiving two `Modify(Name(Any))` events instead
+                        // of one `Modify(Name(From))` event followed by a `Modify(Name(To))` event. Thus, the debouncer
+                        // cannot correctly interpret these as part of an atomic save and will cause issues (too long to
+                        // explain here in detail unfortunately). See https://github.com/flxzt/rnote/pull/1678 for more info.
+                        return;
+                    }
                     canvas.set_unsaved_changes(true);
                     canvas.set_output_file(None);
                     appwindow.overlays().dispatch_toast_text(
@@ -975,6 +1140,11 @@ impl RnCanvas {
                         return;
                     };
                     if !crate::utils::paths_abs_eq(file_path, event_path).unwrap_or(false) {
+                        return;
+                    }
+                    if canvas.output_file_expect_write() {
+                        // Atomic save operations replace the file by temporarily removing or overwriting
+                        // the original file's data/metadata, generating a Remove event. We should ignore these.
                         return;
                     }
                     canvas.set_unsaved_changes(true);
@@ -1000,8 +1170,14 @@ impl RnCanvas {
             }
         };
 
-        let new_watcher_task = glib::spawn_future_local(
-            glib::clone!(@strong file, @weak self as canvas, @weak appwindow => async move {
+        let new_watcher_task = glib::spawn_future_local(glib::clone!(
+            #[strong]
+            file,
+            #[weak(rename_to=canvas)]
+            self,
+            #[weak]
+            appwindow,
+            async move {
                 let (tx, mut rx) = futures::channel::mpsc::unbounded();
                 let Some(file_path) = file.path() else {
                     warn!("Can't create watcher for file that has no path");
@@ -1012,23 +1188,34 @@ impl RnCanvas {
                     return;
                 };
 
-                let mut debouncer = match notify_debouncer_full::new_debouncer(Duration::from_millis(1000), None, move |res| {
-                    if let Err(e) = tx.unbounded_send(res) {
-                        error!("File watcher reported change, but failed to send it through channel. Err: {e:?}");
-                    }
-                }) {
-                    Ok(w) => {
-                        w
+                let mut debouncer = match notify_debouncer_full::new_debouncer(
+                    Duration::from_millis(1000),
+                    None,
+                    move |res| {
+                        if let Err(e) = tx.unbounded_send(res) {
+                            error!(
+                                "File watcher reported change, but failed to send it through channel. Err: {e:?}"
+                            );
+                        }
                     },
+                ) {
+                    Ok(w) => w,
                     Err(e) => {
                         error!("Failed to create file watcher, Err: {e:?}");
                         return;
                     }
                 };
-                if let Err(e) = debouncer.watcher().watch(parent_path, notify::RecursiveMode::NonRecursive) {
-                    error!("Failed to start watching directory '{}', Err: {e:?}", parent_path.display());
+                if let Err(e) = debouncer.watch(parent_path, notify::RecursiveMode::NonRecursive) {
+                    error!(
+                        "Failed to start watching directory '{}', Err: {e:?}",
+                        parent_path.display()
+                    );
                 }
-                debouncer.cache().add_root(parent_path, notify::RecursiveMode::NonRecursive);
+                debug!(
+                    "Started watching directory '{}', targetting the file '{:?}'",
+                    parent_path.display(),
+                    file_path.file_name().map(|f| f.display())
+                );
                 while let Some(res) = rx.next().await {
                     match res {
                         Ok(events) => {
@@ -1039,8 +1226,8 @@ impl RnCanvas {
                         Err(e) => error!("File watcher sent error message, Err: {e:?}"),
                     }
                 }
-            }),
-        );
+            }
+        ));
 
         if let Some(old_watcher_task) = self
             .imp()
@@ -1069,16 +1256,19 @@ impl RnCanvas {
 
         let appwindow_output_file = self.connect_notify_local(
             Some("output-file"),
-            clone!(@weak appwindow => move |canvas, _pspec| {
-                if let Some(output_file) = canvas.output_file(){
-                    canvas.create_output_file_watcher(&output_file, &appwindow);
-                } else {
-                    canvas.clear_output_file_watcher();
-                    canvas.dismiss_output_file_modified_toast();
+            clone!(
+                #[weak]
+                appwindow,
+                move |canvas, _pspec| {
+                    if let Some(output_file) = canvas.output_file() {
+                        canvas.create_output_file_watcher(&output_file, &appwindow);
+                    } else {
+                        canvas.clear_output_file_watcher();
+                        canvas.dismiss_output_file_modified_toast();
+                    }
+                    appwindow.refresh_titles(canvas);
                 }
-
-                appwindow.refresh_titles(&appwindow.active_tab_wrapper());
-            }),
+            ),
         );
 
         // set scale factor initially
@@ -1097,21 +1287,29 @@ impl RnCanvas {
         // Reset
         let appwindow_save_in_progress = self.connect_notify_local(
             Some("save-in-progress"),
-            clone!(@weak appwindow => move |canvas, _| {
-                if canvas.save_in_progress() {
-                    appwindow.set_save_in_progress(true);
-                } else if !appwindow.tabs_any_saves_in_progress() {
-                    appwindow.set_save_in_progress(false);
+            clone!(
+                #[weak]
+                appwindow,
+                move |canvas, _| {
+                    if canvas.save_in_progress() {
+                        appwindow.set_save_in_progress(true);
+                    } else if !appwindow.tabs_any_saves_in_progress() {
+                        appwindow.set_save_in_progress(false);
+                    }
                 }
-            }),
+            ),
         );
 
         // Update titles when there are changes
         let appwindow_unsaved_changes = self.connect_notify_local(
             Some("unsaved-changes"),
-            clone!(@weak appwindow => move |_, _| {
-                appwindow.refresh_titles(&appwindow.active_tab_wrapper());
-            }),
+            clone!(
+                #[weak]
+                appwindow,
+                move |canvas, _| {
+                    appwindow.refresh_titles(canvas);
+                }
+            ),
         );
 
         // one per-appwindow property for touch-drawing
@@ -1149,53 +1347,79 @@ impl RnCanvas {
             .build();
 
         // Drop Target
-        let appwindow_drop_target = self.imp().drop_target.connect_drop(
-            clone!(@weak self as canvas, @weak appwindow => @default-return false, move |_, value, x, y| {
-                let pos = (canvas.engine_ref().camera.transform().inverse() *
-                    na::point![x,y]).coords;
+        let appwindow_drop_target = self.imp().drop_target.connect_drop(clone!(
+            #[weak(rename_to=canvas)]
+            self,
+            #[weak]
+            appwindow,
+            #[upgrade_or]
+            false,
+            move |_, value, x, y| {
+                let pos = canvas
+                    .engine_ref()
+                    .camera
+                    .transform()
+                    .inverse()
+                    .transform_point2(Vector2::new(x, y));
                 let mut accept_drop = false;
 
                 if value.is::<gio::File>() {
                     // In some scenarios, get() can fail with `UnexpectedNone` even though is() returned true, e.g. when dealing with trashed files.
                     match value.get::<gio::File>() {
                         Ok(file) => {
-                            glib::spawn_future_local(clone!(@weak appwindow => async move {
-                                appwindow.open_file_w_dialogs(file, Some(pos), true).await;
-                            }));
+                            glib::spawn_future_local(clone!(
+                                #[weak]
+                                appwindow,
+                                async move {
+                                    appwindow.open_file_w_dialogs(file, Some(pos), true).await;
+                                }
+                            ));
                             accept_drop = true;
-                        },
+                        }
                         Err(e) => {
                             error!("Failed to get dropped in file, Err: {e:?}");
-                            appwindow.overlays().dispatch_toast_error(&gettext("Inserting file failed"));
-                        },
+                            appwindow
+                                .overlays()
+                                .dispatch_toast_error(&gettext("Inserting file failed"));
+                        }
                     };
                 } else if value.is::<String>() {
                     match canvas.load_in_text(value.get::<String>().unwrap(), Some(pos)) {
                         Ok(_) => {
                             accept_drop = true;
-                        },
+                        }
                         Err(e) => {
                             error!("Failed to insert dropped in text, Err: {e:?}");
-                            appwindow.overlays().dispatch_toast_error(&gettext("Inserting text failed"));
+                            appwindow
+                                .overlays()
+                                .dispatch_toast_error(&gettext("Inserting text failed"));
                         }
                     };
                 }
 
                 accept_drop
-            }),
-        );
+            }
+        ));
 
         // handle widget flags
         let appwindow_handle_widget_flags = self.connect_local(
             "handle-widget-flags",
             false,
-            clone!(@weak self as canvas, @weak appwindow => @default-return None, move |args| {
-                // first argument is the widget, second is widget flags
-                let widget_flags = args[1].get::<WidgetFlagsBoxed>().unwrap().inner();
+            clone!(
+                #[weak(rename_to=canvas)]
+                self,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |args| {
+                    // first argument is the widget, second is widget flags
+                    let widget_flags = args[1].get::<WidgetFlagsBoxed>().unwrap().inner();
 
-                appwindow.handle_widget_flags(widget_flags, &canvas);
-                None
-            }),
+                    appwindow.handle_widget_flags(widget_flags, &canvas);
+                    None
+                }
+            ),
         );
 
         // Replace connections
@@ -1260,6 +1484,11 @@ impl RnCanvas {
         {
             self.disconnect(old);
         }
+
+        let widget_flags = self
+            .engine_mut()
+            .install_config(appwindow.engine_config(), env::pkg_data_dir().ok());
+        appwindow.handle_widget_flags(widget_flags, self);
     }
 
     /// Disconnect all connections with references to external objects
@@ -1307,6 +1536,9 @@ impl RnCanvas {
         if let Some(old) = connections.tab_page_unsaved_changes.take() {
             old.unbind();
         }
+        if let Some(old) = connections.tab_page_invalidate_thumbnail.take() {
+            self.disconnect(old);
+        }
     }
 
     /// When the widget is the child of a tab page, we want to connect their titles, icons, ..
@@ -1336,6 +1568,22 @@ impl RnCanvas {
             .sync_create()
             .build();
 
+        // handle invalidating cached thumbnail in the tabs overview panel
+        let tab_page_invalidate_thumbnail = self.connect_local(
+            "invalidate-thumbnail",
+            false,
+            clone!(
+                #[weak]
+                page,
+                #[upgrade_or]
+                None,
+                move |_| {
+                    page.invalidate_thumbnail();
+                    None
+                }
+            ),
+        );
+
         let mut connections = self.imp().connections.borrow_mut();
         if let Some(old) = connections
             .tab_page_output_file
@@ -1349,12 +1597,18 @@ impl RnCanvas {
         {
             old.unbind();
         }
+        if let Some(old) = connections
+            .tab_page_invalidate_thumbnail
+            .replace(tab_page_invalidate_thumbnail)
+        {
+            self.disconnect(old);
+        }
     }
 
     pub(crate) fn bounds(&self) -> Aabb {
         Aabb::new_positive(
-            na::point![0.0, 0.0],
-            na::point![f64::from(self.width()), f64::from(self.height())],
+            Vector2::ZERO,
+            Vector2::new(self.width() as f64, self.height() as f64),
         )
     }
 }

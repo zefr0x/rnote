@@ -11,11 +11,13 @@
             <property name="show-start-title-buttons">false</property>
             <child type="start">
               <object class="GtkButton" id="export_doc_button_cancel">
+                <property name="limit-events">true</property>
                 <property name="label" translatable="yes">Cancel</property>
               </object>
             </child>
             <child type="end">
               <object class="GtkButton" id="export_doc_button_confirm">
+                <property name="limit-events">true</property>
                 <property name="label" translatable="yes">Export</property>
                 <property name="sensitive">false</property>
                 <style>
@@ -180,11 +182,13 @@ are cut into pages</property>
             <property name="show-start-title-buttons">false</property>
             <child type="start">
               <object class="GtkButton" id="export_doc_pages_button_cancel">
+                <property name="limit-events">true</property>
                 <property name="label" translatable="yes">Cancel</property>
               </object>
             </child>
             <child type="end">
               <object class="GtkButton" id="export_doc_pages_button_confirm">
+                <property name="limit-events">true</property>
                 <property name="label" translatable="yes">Export</property>
                 <property name="sensitive">false</property>
                 <style>
@@ -355,8 +359,8 @@ are cut into pages</property>
                               <object class="AdwComboRow" id="export_doc_pages_page_order_row">
                                 <property name="title" translatable="yes">Page Order</property>
                                 <property name="subtitle" translatable="yes">The page order when documents with layouts
-    that expand in horizontal and vertical directions
-    are cut into pages</property>
+that expand in horizontal and vertical directions
+are cut into pages</property>
                                 <property name="model">
                                   <object class="GtkStringList">
                                     <items>
@@ -371,7 +375,7 @@ are cut into pages</property>
                               <object class="AdwSpinRow" id="export_doc_pages_bitmap_scalefactor_row">
                                 <property name="title" translatable="yes">Bitmap Scale-Factor</property>
                                 <property name="subtitle" translatable="yes">Set the bitmap scale factor in relation
-    to the actual size on the document</property>
+to the actual size on the document</property>
                                 <property name="adjustment">export_doc_pages_bitmap_scalefactor_adj</property>
                                 <property name="digits">1</property>
                               </object>
@@ -420,11 +424,13 @@ are cut into pages</property>
             <property name="show-start-title-buttons">false</property>
             <child type="start">
               <object class="GtkButton" id="export_selection_button_cancel">
+                <property name="limit-events">true</property>
                 <property name="label" translatable="yes">Cancel</property>
               </object>
             </child>
             <child type="end">
               <object class="GtkButton" id="export_selection_button_confirm">
+                <property name="limit-events">true</property>
                 <property name="label" translatable="yes">Export</property>
                 <property name="sensitive">false</property>
                 <style>

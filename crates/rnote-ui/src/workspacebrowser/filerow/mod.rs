@@ -4,8 +4,8 @@ mod actions;
 // Imports
 use crate::RnAppWindow;
 use gtk4::{
-    gdk, gio, glib, glib::clone, prelude::*, subclass::prelude::*, CompositeTemplate, DragSource,
-    GestureClick, GestureLongPress, Image, Label, MenuButton, PopoverMenu, Widget,
+    CompositeTemplate, DragSource, GestureClick, GestureLongPress, Image, Label, MenuButton,
+    PopoverMenu, Widget, gdk, gio, glib, glib::clone, prelude::*, subclass::prelude::*,
 };
 use once_cell::sync::Lazy;
 use std::cell::{Cell, RefCell};
@@ -135,11 +135,13 @@ mod imp {
                 .button(gdk::BUTTON_SECONDARY)
                 .build();
             obj.add_controller(rightclick_gesture.clone());
-            rightclick_gesture.connect_pressed(
-                clone!(@weak obj as filerow => move |_rightclick_gesture, _n_press, _x, _y| {
+            rightclick_gesture.connect_pressed(clone!(
+                #[weak(rename_to=filerow)]
+                obj,
+                move |_rightclick_gesture, _n_press, _x, _y| {
                     filerow.imp().popovermenu.popup();
-                }),
-            );
+                }
+            ));
 
             let longpress_gesture = GestureLongPress::builder()
                 .name("longpress_gesture")
@@ -148,18 +150,21 @@ mod imp {
             obj.add_controller(longpress_gesture.clone());
             longpress_gesture.group_with(&rightclick_gesture);
 
-            longpress_gesture.connect_pressed(
-                clone!(@weak obj as filerow => move |_rightclick_gesture, _x, _y| {
+            longpress_gesture.connect_pressed(clone!(
+                #[weak(rename_to=filerow)]
+                obj,
+                move |_rightclick_gesture, _x, _y| {
                     filerow.imp().popovermenu.popup();
-                }),
-            );
+                }
+            ));
         }
     }
 }
 
 glib::wrapper! {
     pub(crate) struct RnFileRow(ObjectSubclass<imp::RnFileRow>)
-        @extends gtk4::Widget;
+        @extends Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 
 impl Default for RnFileRow {
@@ -212,13 +217,20 @@ impl RnFileRow {
     pub(crate) fn init(&self, appwindow: &RnAppWindow) {
         self.setup_actions(appwindow);
 
-        self.imp().popovermenu.connect_visible_notify(
-            clone!(@weak self as filerow, @weak appwindow => move |w| {
+        self.imp().popovermenu.connect_visible_notify(clone!(
+            #[weak(rename_to=filerow)]
+            self,
+            #[weak]
+            appwindow,
+            move |w| {
                 if w.get_visible() {
-                    appwindow.sidebar().workspacebrowser().files_list_set_selected(Some(filerow.position()));
+                    appwindow
+                        .sidebar()
+                        .workspacebrowser()
+                        .files_list_set_selected(Some(filerow.position()));
                 }
-            }),
-        );
+            }
+        ));
     }
 
     fn setup_actions(&self, appwindow: &RnAppWindow) {

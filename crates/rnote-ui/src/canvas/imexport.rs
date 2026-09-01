@@ -1,15 +1,15 @@
 // Imports
 use super::RnCanvas;
-use anyhow::Context;
+use crate::RnAppWindow;
 use futures::channel::oneshot;
-use futures::AsyncWriteExt;
 use gtk4::{gio, prelude::*};
+use p2d::math::Vector2;
 use rnote_compose::ext::Vector2Ext;
+use rnote_engine::WidgetFlags;
 use rnote_engine::engine::export::{DocExportPrefs, DocPagesExportPrefs, SelectionExportPrefs};
 use rnote_engine::engine::{EngineSnapshot, StrokeContent};
-use rnote_engine::strokes::resize::ImageSizeOption;
 use rnote_engine::strokes::Stroke;
-use rnote_engine::WidgetFlags;
+use rnote_engine::strokes::resize::ImageSizeOption;
 use std::ops::Range;
 use std::path::Path;
 use tracing::{debug, error};
@@ -60,8 +60,16 @@ impl RnCanvas {
         Ok(())
     }
 
-    pub(crate) async fn load_in_xopp_bytes(&self, bytes: Vec<u8>) -> anyhow::Result<()> {
-        let xopp_import_prefs = self.engine_ref().import_prefs.xopp_import_prefs;
+    pub(crate) async fn load_in_xopp_bytes(
+        &self,
+        appwindow: &RnAppWindow,
+        bytes: Vec<u8>,
+    ) -> anyhow::Result<()> {
+        let xopp_import_prefs = appwindow
+            .engine_config()
+            .read()
+            .import_prefs
+            .xopp_import_prefs;
         let engine_snapshot =
             EngineSnapshot::load_from_xopp_bytes(bytes, xopp_import_prefs).await?;
         let widget_flags = self.engine_mut().load_snapshot(engine_snapshot);
@@ -79,7 +87,7 @@ impl RnCanvas {
     pub(crate) async fn load_in_vectorimage_bytes(
         &self,
         bytes: Vec<u8>,
-        target_pos: Option<na::Vector2<f64>>,
+        target_pos: Option<Vector2>,
         respect_borders: bool,
     ) -> anyhow::Result<()> {
         let pos = self.determine_stroke_import_pos(target_pos);
@@ -104,7 +112,7 @@ impl RnCanvas {
     pub(crate) async fn load_in_bitmapimage_bytes(
         &self,
         bytes: Vec<u8>,
-        target_pos: Option<na::Vector2<f64>>,
+        target_pos: Option<Vector2>,
         respect_borders: bool,
     ) -> anyhow::Result<()> {
         let pos = self.determine_stroke_import_pos(target_pos);
@@ -126,20 +134,23 @@ impl RnCanvas {
     /// `target_pos` is in coordinate space of the doc.
     pub(crate) async fn load_in_pdf_bytes(
         &self,
+        appwindow: &RnAppWindow,
         bytes: Vec<u8>,
-        target_pos: Option<na::Vector2<f64>>,
-        page_range: Option<Range<u32>>,
+        target_pos: Option<Vector2>,
+        page_range: Option<Range<usize>>,
+        password: Option<String>,
     ) -> anyhow::Result<()> {
         let pos = self.determine_stroke_import_pos(target_pos);
-        let adjust_document = self
-            .engine_ref()
+        let adjust_document = appwindow
+            .engine_config()
+            .read()
             .import_prefs
             .pdf_import_prefs
             .adjust_document;
 
         let strokes_receiver = self
             .engine_mut()
-            .generate_pdf_pages_from_bytes(bytes, pos, page_range);
+            .generate_pdf_pages_from_bytes(bytes, pos, page_range, password);
         let strokes = strokes_receiver.await??;
         let widget_flags = self
             .engine_mut()
@@ -155,7 +166,7 @@ impl RnCanvas {
     pub(crate) fn load_in_text(
         &self,
         text: String,
-        target_pos: Option<na::Vector2<f64>>,
+        target_pos: Option<Vector2>,
     ) -> anyhow::Result<()> {
         let pos = self.determine_stroke_import_pos(target_pos);
 
@@ -172,7 +183,7 @@ impl RnCanvas {
         &self,
         json_string: String,
         resize_option: ImageSizeOption,
-        target_pos: Option<na::Vector2<f64>>,
+        target_pos: Option<Vector2>,
     ) -> anyhow::Result<()> {
         let (oneshot_sender, oneshot_receiver) =
             oneshot::channel::<anyhow::Result<StrokeContent>>();
@@ -199,8 +210,10 @@ impl RnCanvas {
 
     /// Saves the document to the given file.
     ///
-    /// Returns Ok(true) if saved successfully, Ok(false) when a save is already in progress and no file operatiosn were
-    /// executed, Err(e) when saving failed in any way.
+    /// Returns:
+    /// - `Ok(true)` if saving was successful
+    /// - `Ok(false)` if a save was already in progress (and thus this function didn't do anything)
+    /// - `Err(e)` when saving failed in any way
     #[tracing::instrument(skip_all, fields(path = format!("{:?}", file.path())))]
     pub(crate) async fn save_document_to_file(&self, file: &gio::File) -> anyhow::Result<bool> {
         // skip saving when it is already in progress
@@ -211,49 +224,32 @@ impl RnCanvas {
         self.set_save_in_progress(true);
         debug!("Saving file is now in progress");
 
-        let file_path = file
-            .path()
-            .ok_or_else(|| anyhow::anyhow!("Could not get a path for file: `{file:?}`."))?;
-        let basename = file
-            .basename()
-            .ok_or_else(|| anyhow::anyhow!("Could not retrieve basename for file: `{file:?}`."))?;
+        let filepath = file.path().ok_or_else(|| {
+            self.set_save_in_progress(false);
+            anyhow::anyhow!("Could not get a path for file: `{file:?}`.")
+        })?;
+        let basename = file.basename().ok_or_else(|| {
+            self.set_save_in_progress(false);
+            anyhow::anyhow!("Could not retrieve basename for file: `{file:?}`.")
+        })?;
         let rnote_bytes_receiver = self
             .engine_ref()
             .save_as_rnote_bytes(basename.to_string_lossy().to_string());
+
         let mut skip_set_output_file = false;
-        if let Some(output_file_path) = self.output_file().and_then(|f| f.path()) {
-            if crate::utils::paths_abs_eq(output_file_path, &file_path).unwrap_or(false) {
-                skip_set_output_file = true;
-            }
+        if let Some(output_filepath) = self.output_file().and_then(|f| f.path())
+            && crate::utils::paths_abs_eq(output_filepath, &filepath).unwrap_or(false)
+        {
+            skip_set_output_file = true;
         }
+
         self.dismiss_output_file_modified_toast();
 
-        let file_write_operation = async move {
+        let file_write_operation = async {
             let bytes = rnote_bytes_receiver.await??;
+            // The `output_file_expect_write` should theoretically be reset to `false` by the file watcher later.
             self.set_output_file_expect_write(true);
-            let mut write_file = async_fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(&file_path)
-                .await
-                .context(format!(
-                    "Failed to create/open/truncate file for path '{}'",
-                    file_path.display()
-                ))?;
-            if !skip_set_output_file {
-                // this installs the file watcher.
-                self.set_output_file(Some(file.to_owned()));
-            }
-            write_file.write_all(&bytes).await.context(format!(
-                "Failed to write bytes to file with path '{}'",
-                file_path.display()
-            ))?;
-            write_file.sync_all().await.context(format!(
-                "Failed to sync file after writing with path '{}'",
-                file_path.display()
-            ))?;
-            Ok(())
+            crate::utils::atomic_save_to_file_future(&filepath, bytes).await
         };
 
         if let Err(e) = file_write_operation.await {
@@ -265,6 +261,14 @@ impl RnCanvas {
         }
 
         debug!("Saving file has finished successfully");
+
+        if !skip_set_output_file {
+            // We only create/replace the file watcher once we are sure the file was successfully saved.
+            self.set_output_file(Some(file.to_owned()));
+            // Required, otherwise `output_file_expect_write` will be stuck on true after saving for the
+            // first time or saving as another filename, until the subsequent save at least.
+            self.set_output_file_expect_write(false);
+        }
         self.set_unsaved_changes(false);
         self.set_save_in_progress(false);
 
@@ -291,6 +295,7 @@ impl RnCanvas {
     /// file extension overwrites existing files with the same name!
     pub(crate) async fn export_doc_pages(
         &self,
+        appwindow: &RnAppWindow,
         dir: &gio::File,
         file_stem_name: String,
         export_prefs_override: Option<DocPagesExportPrefs>,
@@ -302,8 +307,13 @@ impl RnCanvas {
                 "Supplied target file `{dir:?}` is not a directory."
             ));
         }
-        let export_prefs =
-            export_prefs_override.unwrap_or(self.engine_ref().export_prefs.doc_pages_export_prefs);
+        let export_prefs = export_prefs_override.unwrap_or(
+            appwindow
+                .engine_config()
+                .read()
+                .export_prefs
+                .doc_pages_export_prefs,
+        );
         let file_ext = export_prefs.export_format.file_ext();
 
         let export_bytes_recv = self.engine_ref().export_doc_pages(export_prefs_override);
@@ -354,33 +364,17 @@ impl RnCanvas {
         Ok(())
     }
 
-    /// exports and writes the engine config as json into the file.
-    /// Only for debugging!
-    pub(crate) async fn export_engine_config(&self, file: &gio::File) -> anyhow::Result<()> {
-        let exported_engine_config = self.engine_ref().export_engine_config_as_json()?;
-
-        crate::utils::create_replace_file_future(exported_engine_config.into_bytes(), file).await?;
-
-        self.set_last_export_dir(file.parent());
-
-        Ok(())
-    }
-
-    fn determine_stroke_import_pos(
-        &self,
-        target_pos: Option<na::Vector2<f64>>,
-    ) -> na::Vector2<f64> {
+    fn determine_stroke_import_pos(&self, target_pos: Option<Vector2>) -> Vector2 {
         target_pos.unwrap_or_else(|| {
             self.engine_ref()
                 .camera
                 .transform()
                 .inverse()
-                .transform_point(&na::Point2::from(Stroke::IMPORT_OFFSET_DEFAULT))
-                .coords
-                .maxs(&na::vector![
+                .transform_point2(Stroke::IMPORT_OFFSET_DEFAULT)
+                .maxs(&Vector2::new(
                     self.engine_ref().document.x,
-                    self.engine_ref().document.y
-                ])
+                    self.engine_ref().document.y,
+                ))
         })
     }
 }

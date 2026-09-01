@@ -7,8 +7,8 @@ pub(crate) use group::RnGroupedIconPickerGroup;
 
 // Imports
 use gtk4::{
-    glib, glib::clone, prelude::*, subclass::prelude::*, CompositeTemplate, Label, ListBox,
-    StringList, StringObject, Widget,
+    CompositeTemplate, Label, ListBox, StringList, StringObject, Widget, glib, glib::clone,
+    prelude::*, subclass::prelude::*,
 };
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
@@ -68,9 +68,11 @@ mod imp {
         fn properties() -> &'static [glib::ParamSpec] {
             static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
                 // we can use it to represent Option<String>
-                vec![glib::ParamSpecString::builder("picked")
-                    .default_value(None)
-                    .build()]
+                vec![
+                    glib::ParamSpecString::builder("picked")
+                        .default_value(None)
+                        .build(),
+                ]
             });
             PROPERTIES.as_ref()
         }
@@ -101,7 +103,7 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnGroupedIconPicker(ObjectSubclass<imp::RnGroupedIconPicker>)
-        @extends gtk4::Widget,
+        @extends Widget,
         @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 
@@ -137,13 +139,30 @@ impl RnGroupedIconPicker {
     ) {
         let model = StringList::from_iter(groups.iter().map(|x| x.name.clone()));
 
-        self.imp().listbox.get().bind_model(Some(&model), clone!(@weak self as iconpicker => @default-panic, move |obj| {
-            let group_name = obj.downcast_ref::<StringObject>().expect(
+        self.imp().listbox.get().bind_model(
+            Some(&model),
+            clone!(
+                #[weak(rename_to=iconpicker)]
+                self,
+                #[upgrade_or_panic]
+                move |obj| {
+                    let group_name = obj.downcast_ref::<StringObject>().expect(
                 "Binding IconPickerListFactory model failed, item has to be of type `StringObject`",
             ).string();
-            let icon_names = &groups.iter().find(|x| x.name.as_str() == group_name.as_str()).unwrap().icons;
-            let group = RnGroupedIconPickerGroup::new(&group_name.to_string(), icon_names, &iconpicker, generate_display_name);
-            group.upcast::<Widget>()
-        }));
+                    let icon_names = &groups
+                        .iter()
+                        .find(|x| x.name.as_str() == group_name.as_str())
+                        .unwrap()
+                        .icons;
+                    let group = RnGroupedIconPickerGroup::new(
+                        &group_name.to_string(),
+                        icon_names,
+                        &iconpicker,
+                        generate_display_name,
+                    );
+                    group.upcast::<Widget>()
+                }
+            ),
+        );
     }
 }

@@ -1,18 +1,19 @@
 // Imports
-use crate::{export, import, test};
+use crate::{create, export, import, test, thumbnail};
 use anyhow::Context;
 use clap::Parser;
 use rnote_compose::SplitOrder;
+use rnote_engine::SelectionCollision;
 use rnote_engine::engine::export::{
     DocExportFormat, DocPagesExportFormat, DocPagesExportPrefs, SelectionExportFormat,
     SelectionExportPrefs,
 };
 use rnote_engine::engine::import::XoppImportPrefs;
-use rnote_engine::SelectionCollision;
 use smol::fs::File;
 use smol::io::{AsyncReadExt, AsyncWriteExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tracing::debug;
 
 ///    rnote-cli{n}{n}
 ///    This program is free software; you can redistribute it{n}
@@ -23,6 +24,10 @@ use std::time::Duration;
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Command,
+}
+
+impl Cli {
+    pub(crate) const THUMBNAIL_TIMEOUT_DEFAULT: u64 = 5;
 }
 
 #[derive(clap::Subcommand, Debug, Clone)]
@@ -68,6 +73,25 @@ pub(crate) enum Command {
         /// Opens output folder when using "doc-pages" sub-command.
         #[arg(long, action = clap::ArgAction::SetTrue, global = true)]
         open: bool,
+    },
+    /// Generate a thumbail from a given rnote file.
+    Thumbnail {
+        /// The rnote file for which a thumbnail will be created.
+        rnote_file: PathBuf,
+        /// Size of the thumbnail in pixel.
+        #[arg(short, long, default_value_t = 256)]
+        size: u32,
+        /// The time how long thumbnail generation is allowed to take in [sec].
+        /// Set to 0 for unlimited timeout. If not set, defaults to : 5 secs
+        #[arg(short, long)]
+        timeout: Option<u64>,
+        /// Output path for the thumbnail.
+        output: PathBuf,
+    },
+    /// Create a new (empty) rnote file.
+    Create {
+        /// The new rnote file path.
+        rnote_file: PathBuf,
     },
 }
 
@@ -203,6 +227,9 @@ impl std::fmt::Display for OnConflict {
 }
 
 pub(crate) async fn run() -> anyhow::Result<()> {
+    if let Err(err) = initialize_tracing() {
+        eprintln!("Failure initializing tracing: {err:?}");
+    };
     let cli = Cli::parse();
 
     match cli.command {
@@ -242,8 +269,43 @@ pub(crate) async fn run() -> anyhow::Result<()> {
             .await?;
             println!("Export finished!");
         }
+        Command::Thumbnail {
+            rnote_file,
+            size,
+            timeout,
+            output,
+        } => {
+            println!("Thumbnail...");
+            let timeout = timeout.unwrap_or(Cli::THUMBNAIL_TIMEOUT_DEFAULT);
+            let timeout = if timeout == 0 {
+                None
+            } else {
+                Some(Duration::from_secs(timeout))
+            };
+            thumbnail::run_thumbnail(rnote_file, size, output, timeout).await?;
+        }
+        Command::Create {
+            rnote_file: new_rnote_file,
+        } => {
+            println!("Creating new file..");
+            create::run_create(&new_rnote_file).await?;
+            println!("File creation finished!");
+        }
     }
 
+    Ok(())
+}
+
+fn initialize_tracing() -> anyhow::Result<()> {
+    let timer = tracing_subscriber::fmt::time::Uptime::default();
+
+    tracing_subscriber::fmt()
+        .compact()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_timer(timer)
+        .try_init()
+        .map_err(|err| anyhow::anyhow!(err))?;
+    debug!(".. tracing subscriber initialized.");
     Ok(())
 }
 

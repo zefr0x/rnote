@@ -27,8 +27,15 @@ mod imp {
 
     impl Default for RnWorkspaceListEntryInner {
         fn default() -> Self {
+            let dir = std::env::home_dir().unwrap_or_else(|| {
+                if cfg!(target_os = "windows") {
+                    PathBuf::from("C:\\")
+                } else {
+                    PathBuf::from("./")
+                }
+            });
             Self {
-                dir: PathBuf::from("./"),
+                dir,
                 icon: String::from("workspacelistentryicon-folder-symbolic"),
                 color: super::RnWorkspaceListEntry::COLOR_DEFAULT.as_rgba_u32(),
                 name: String::from("default"),
@@ -178,8 +185,8 @@ impl RnWorkspaceListEntry {
         self.set_property("name", name.to_value());
     }
 
-    pub(crate) fn canonicalize_dir(&self) -> anyhow::Result<()> {
-        let p = PathBuf::from(self.dir()).canonicalize()?;
+    pub(crate) fn ensure_dir(&self) -> anyhow::Result<()> {
+        let p = crate::utils::path_walk_up_until_exists(self.dir())?;
         self.set_dir(p.to_string_lossy().to_string());
         Ok(())
     }

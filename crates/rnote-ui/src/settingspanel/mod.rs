@@ -7,18 +7,19 @@ pub(crate) use penshortcutrow::RnPenShortcutRow;
 use rnote_compose::ext::Vector2Ext;
 
 // Imports
-use crate::{RnAppWindow, RnCanvasWrapper, RnIconPicker, RnUnitEntry};
+use crate::{RnAppWindow, RnIconPicker, RnUnitEntry};
 use adw::prelude::*;
 use gettextrs::{gettext, pgettext};
 use gtk4::{
-    gdk, glib, glib::clone, subclass::prelude::*, Adjustment, Button, ColorDialogButton,
-    CompositeTemplate, MenuButton, ScrolledWindow, StringList, ToggleButton, Widget,
+    Adjustment, Button, ColorDialogButton, CompositeTemplate, MenuButton, ScrolledWindow,
+    StringList, ToggleButton, Widget, gdk, glib, glib::clone, subclass::prelude::*,
 };
 use num_traits::ToPrimitive;
 use rnote_compose::penevent::ShortcutKey;
+use rnote_engine::WidgetFlags;
+use rnote_engine::document::Layout;
 use rnote_engine::document::background::PatternStyle;
 use rnote_engine::document::format::{self, Format, PredefinedFormat};
-use rnote_engine::document::Layout;
 use rnote_engine::ext::GdkRGBAExt;
 use std::cell::RefCell;
 
@@ -58,6 +59,10 @@ mod imp {
         #[template_child]
         pub(crate) format_predefined_formats_row: TemplateChild<adw::ComboRow>,
         #[template_child]
+        pub(crate) format_save_preset_button: TemplateChild<Button>,
+        #[template_child]
+        pub(crate) format_restore_preset_button: TemplateChild<Button>,
+        #[template_child]
         pub(crate) format_orientation_row: TemplateChild<adw::ActionRow>,
         #[template_child]
         pub(crate) format_orientation_portrait_toggle: TemplateChild<ToggleButton>,
@@ -80,7 +85,15 @@ mod imp {
         #[template_child]
         pub(crate) format_apply_button: TemplateChild<Button>,
         #[template_child]
+        pub(crate) doc_preferences_group: TemplateChild<adw::PreferencesGroup>,
+        #[template_child]
+        pub(crate) doc_save_preset_button: TemplateChild<Button>,
+        #[template_child]
+        pub(crate) doc_restore_preset_button: TemplateChild<Button>,
+        #[template_child]
         pub(crate) doc_document_layout_row: TemplateChild<adw::ComboRow>,
+        #[template_child]
+        pub(crate) doc_show_format_borders_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) doc_format_border_color_button: TemplateChild<ColorDialogButton>,
         #[template_child]
@@ -93,6 +106,8 @@ mod imp {
         pub(crate) doc_background_pattern_width_unitentry: TemplateChild<RnUnitEntry>,
         #[template_child]
         pub(crate) doc_background_pattern_height_unitentry: TemplateChild<RnUnitEntry>,
+        #[template_child]
+        pub(crate) doc_show_origin_indicator_row: TemplateChild<adw::SwitchRow>,
         #[template_child]
         pub(crate) background_pattern_invert_color_button: TemplateChild<Button>,
         #[template_child]
@@ -123,7 +138,7 @@ mod imp {
     impl ObjectSubclass for RnSettingsPanel {
         const NAME: &'static str = "RnSettingsPanel";
         type Type = super::RnSettingsPanel;
-        type ParentType = gtk4::Widget;
+        type ParentType = Widget;
 
         fn class_init(klass: &mut Self::Class) {
             klass.bind_template();
@@ -140,56 +155,94 @@ mod imp {
             let obj = self.obj();
 
             self.format_predefined_formats_row
-                .connect_selected_item_notify(clone!(@weak obj as settings_panel => move |_| {
-                    settings_panel.imp().apply_predefined_format();
-                }));
-
-            self.format_orientation_portrait_toggle.connect_toggled(
-                clone!(@weak obj as settings_panel => move |toggle| {
-                    if toggle.is_active() && settings_panel.format_orientation() != settings_panel.imp().temporary_format.borrow().orientation() {
-                        settings_panel.imp().swap_width_height();
+                .connect_selected_item_notify(clone!(
+                    #[weak(rename_to=settings_panel)]
+                    obj,
+                    move |_| {
+                        settings_panel.imp().apply_predefined_format();
                     }
-                }),
-            );
+                ));
 
-            self.format_orientation_landscape_toggle.connect_toggled(
-                clone!(@weak obj as settings_panel => move |toggle| {
-                    if toggle.is_active() && settings_panel.format_orientation() != settings_panel.imp().temporary_format.borrow().orientation() {
-                        settings_panel.imp().swap_width_height();
+            self.format_orientation_portrait_toggle
+                .connect_toggled(clone!(
+                    #[weak(rename_to=settings_panel)]
+                    obj,
+                    move |toggle| {
+                        if toggle.is_active()
+                            && settings_panel.format_orientation()
+                                != settings_panel.imp().temporary_format.borrow().orientation()
+                        {
+                            settings_panel.imp().swap_width_height();
+                        }
                     }
-                }),
-            );
+                ));
+
+            self.format_orientation_landscape_toggle
+                .connect_toggled(clone!(
+                    #[weak(rename_to=settings_panel)]
+                    obj,
+                    move |toggle| {
+                        if toggle.is_active()
+                            && settings_panel.format_orientation()
+                                != settings_panel.imp().temporary_format.borrow().orientation()
+                        {
+                            settings_panel.imp().swap_width_height();
+                        }
+                    }
+                ));
 
             self.format_width_unitentry.get().connect_notify_local(
                 Some("value"),
-                clone!(@weak obj as settings_panel => move |entry, _| {
-                        settings_panel.imp().temporary_format
+                clone!(
+                    #[weak(rename_to=settings_panel)]
+                    obj,
+                    move |entry, _| {
+                        settings_panel
+                            .imp()
+                            .temporary_format
                             .borrow_mut()
                             .set_width(entry.value_in_px());
                         settings_panel.imp().update_orientation_toggles();
-                }),
+                    }
+                ),
             );
 
             self.format_height_unitentry.get().connect_notify_local(
                 Some("value"),
-                clone!(@weak obj as settings_panel => move |entry, _| {
-                        settings_panel.imp().temporary_format
+                clone!(
+                    #[weak(rename_to=settings_panel)]
+                    obj,
+                    move |entry, _| {
+                        settings_panel
+                            .imp()
+                            .temporary_format
                             .borrow_mut()
                             .set_height(entry.value_in_px());
                         settings_panel.imp().update_orientation_toggles();
-                }),
+                    }
+                ),
             );
 
-            self.format_dpi_adj.connect_value_changed(
-                clone!(@weak obj as settings_panel => move |adj| {
+            self.format_dpi_adj.connect_value_changed(clone!(
+                #[weak(rename_to=settings_panel)]
+                obj,
+                move |adj| {
                     let dpi = adj.value();
-                    settings_panel.imp().format_width_unitentry.set_dpi_keep_value(dpi);
-                    settings_panel.imp().format_height_unitentry.set_dpi_keep_value(dpi);
-                    settings_panel.imp().temporary_format
+                    settings_panel
+                        .imp()
+                        .format_width_unitentry
+                        .set_dpi_keep_value(dpi);
+                    settings_panel
+                        .imp()
+                        .format_height_unitentry
+                        .set_dpi_keep_value(dpi);
+                    settings_panel
+                        .imp()
+                        .temporary_format
                         .borrow_mut()
                         .set_dpi(adj.value());
-                }),
-            );
+                }
+            ));
         }
 
         fn dispose(&self) {
@@ -259,7 +312,8 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnSettingsPanel(ObjectSubclass<imp::RnSettingsPanel>)
-    @extends Widget;
+        @extends Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 
 impl Default for RnSettingsPanel {
@@ -358,68 +412,92 @@ impl RnSettingsPanel {
             .set_selected(layout.to_u32().unwrap());
     }
 
-    pub(crate) fn refresh_ui(&self, active_tab: &RnCanvasWrapper) {
-        self.refresh_general_ui(active_tab);
-        self.refresh_format_ui(active_tab);
-        self.refresh_doc_ui(active_tab);
-        self.refresh_shortcuts_ui(active_tab);
+    pub(crate) fn refresh_ui(&self, appwindow: &RnAppWindow) {
+        self.refresh_general_ui(appwindow);
+        self.refresh_format_ui(appwindow);
+        self.refresh_doc_ui(appwindow);
+        self.refresh_shortcuts_ui(appwindow);
     }
 
-    fn refresh_general_ui(&self, active_tab: &RnCanvasWrapper) {
+    fn refresh_general_ui(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
-        let canvas = active_tab.canvas();
+        let canvas = appwindow.active_tab_canvas();
 
-        let format_border_color = canvas.engine_ref().document.format.border_color;
-        let optimize_epd = canvas.engine_ref().optimize_epd();
-
-        imp.doc_format_border_color_button
-            .set_rgba(&gdk::RGBA::from_compose_color(format_border_color));
-
+        let optimize_epd = appwindow.engine_config().read().optimize_epd;
         imp.general_optimize_epd_row.set_active(optimize_epd);
+
+        if let Some(canvas) = canvas {
+            let format_border_color = canvas.engine_ref().document.config.format.border_color;
+
+            imp.doc_format_border_color_button
+                .set_rgba(&gdk::RGBA::from_compose_color(format_border_color));
+        }
     }
 
-    fn refresh_format_ui(&self, active_tab: &RnCanvasWrapper) {
+    fn refresh_format_ui(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
-        let canvas = active_tab.canvas();
-        let format = canvas.engine_ref().document.format;
-        *self.imp().temporary_format.borrow_mut() = format;
+        let canvas = appwindow.active_tab_canvas();
 
-        self.set_format_predefined_format_variant(format::PredefinedFormat::Custom);
-        self.set_format_orientation(format.orientation());
-        imp.format_dpi_adj.set_value(format.dpi());
-        imp.format_width_unitentry.set_dpi(format.dpi());
-        imp.format_width_unitentry.set_value_in_px(format.width());
-        imp.format_height_unitentry.set_dpi(format.dpi());
-        imp.format_height_unitentry.set_value_in_px(format.height());
+        if let Some(canvas) = canvas {
+            let format = canvas.engine_ref().document.config.format;
+            *self.imp().temporary_format.borrow_mut() = format;
+
+            self.set_format_predefined_format_variant(format::PredefinedFormat::Custom);
+            self.set_format_orientation(format.orientation());
+            imp.format_dpi_adj.set_value(format.dpi());
+            imp.format_width_unitentry.set_dpi(format.dpi());
+            imp.format_width_unitentry.set_value_in_px(format.width());
+            imp.format_height_unitentry.set_dpi(format.dpi());
+            imp.format_height_unitentry.set_value_in_px(format.height());
+        }
+        // TODO: else insensitive  options
     }
 
-    fn refresh_doc_ui(&self, active_tab: &RnCanvasWrapper) {
+    fn refresh_doc_ui(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
-        let canvas = active_tab.canvas();
-        let background = canvas.engine_ref().document.background;
-        let format = canvas.engine_ref().document.format;
-        let document_layout = canvas.engine_ref().document.layout;
+        let canvas = appwindow.active_tab_canvas();
+        imp.doc_preferences_group.set_sensitive(canvas.is_some());
 
-        imp.doc_background_color_button
-            .set_rgba(&gdk::RGBA::from_compose_color(background.color));
-        self.set_background_pattern(background.pattern);
-        imp.doc_background_pattern_color_button
-            .set_rgba(&gdk::RGBA::from_compose_color(background.pattern_color));
-        imp.doc_background_pattern_width_unitentry
-            .set_dpi(format.dpi());
-        imp.doc_background_pattern_width_unitentry
-            .set_value_in_px(background.pattern_size[0]);
-        imp.doc_background_pattern_height_unitentry
-            .set_dpi(format.dpi());
-        imp.doc_background_pattern_height_unitentry
-            .set_value_in_px(background.pattern_size[1]);
-        self.set_document_layout(&document_layout);
+        if let Some(canvas) = canvas {
+            let background = canvas.engine_ref().document.config.background;
+            let format = canvas.engine_ref().document.config.format;
+            let document_layout = canvas.engine_ref().document.config.layout;
+            let show_format_borders = canvas.engine_ref().document.config.format.show_borders;
+            let show_origin_indicator = canvas
+                .engine_ref()
+                .document
+                .config
+                .format
+                .show_origin_indicator;
+
+            imp.doc_show_format_borders_row
+                .set_active(show_format_borders);
+            imp.doc_background_pattern_color_button
+                .set_rgba(&gdk::RGBA::from_compose_color(background.pattern_color));
+            imp.doc_background_color_button
+                .set_rgba(&gdk::RGBA::from_compose_color(background.color));
+            self.set_background_pattern(background.pattern);
+            imp.doc_background_pattern_width_unitentry
+                .set_dpi(format.dpi());
+            imp.doc_background_pattern_width_unitentry
+                .set_value_in_px(background.pattern_size[0]);
+            imp.doc_background_pattern_height_unitentry
+                .set_dpi(format.dpi());
+            imp.doc_background_pattern_height_unitentry
+                .set_value_in_px(background.pattern_size[1]);
+            self.set_document_layout(&document_layout);
+            imp.doc_show_origin_indicator_row
+                .set_active(show_origin_indicator);
+        }
     }
 
-    fn refresh_shortcuts_ui(&self, active_tab: &RnCanvasWrapper) {
+    fn refresh_shortcuts_ui(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
-        let canvas = active_tab.canvas();
-        let current_shortcuts = canvas.engine_ref().penholder.list_current_shortcuts();
+        let current_shortcuts = appwindow
+            .engine_config()
+            .read()
+            .pens_config
+            .list_current_shortcuts();
 
         current_shortcuts
             .into_iter()
@@ -511,11 +589,14 @@ impl RnSettingsPanel {
         // set on init
         set_overlays_margins(appwindow, imp.general_show_scrollbars_row.is_active());
         // and on change
-        imp.general_show_scrollbars_row.connect_active_notify(
-            clone!(@weak appwindow => move |row| {
+        imp.general_show_scrollbars_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
                     set_overlays_margins(&appwindow, row.is_active());
-            }),
-        );
+                }
+            ));
 
         imp.general_optimize_epd_row
             .bind_property(
@@ -526,11 +607,14 @@ impl RnSettingsPanel {
             .sync_create()
             .build();
 
-        imp.general_optimize_epd_row.connect_active_notify(
-            clone!(@weak appwindow => move |row| {
-                appwindow.active_tab_wrapper().canvas().engine_mut().set_optimize_epd(row.is_active());
-            }),
-        );
+        imp.general_optimize_epd_row.connect_active_notify(clone!(
+            #[weak]
+            appwindow,
+            move |row| {
+                let optimize_epd = row.is_active();
+                appwindow.engine_config().write().optimize_epd = optimize_epd;
+            }
+        ));
 
         // Regular cursor picker
         imp.general_regular_cursor_picker.set_list(
@@ -574,77 +658,285 @@ impl RnSettingsPanel {
             .sync_create()
             .build();
 
-        imp.general_inertial_scrolling_row.connect_active_notify(
-            clone!(@weak self as settingspanel, @weak appwindow => move |row| {
-                if !row.is_active() {
-                    appwindow.overlays().dispatch_toast_text_singleton(
-                        &gettext("Application restart is required"),
-                        None,
-                        &mut settingspanel.imp().app_restart_toast_singleton.borrow_mut()
-                    );
+        imp.general_inertial_scrolling_row
+            .connect_active_notify(clone!(
+                #[weak(rename_to=settingspanel)]
+                self,
+                #[weak]
+                appwindow,
+                move |row| {
+                    if !row.is_active() {
+                        appwindow.overlays().dispatch_toast_text_singleton(
+                            &gettext("Application restart is required"),
+                            None,
+                            &mut settingspanel.imp().app_restart_toast_singleton.borrow_mut(),
+                        );
+                    }
                 }
-            }),
-        );
+            ));
     }
 
     fn setup_format(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
 
+        imp.format_save_preset_button.get().connect_clicked(clone!(
+            #[weak]
+            appwindow,
+            move |_| {
+                let Some(canvas) = appwindow.active_tab_canvas() else {
+                    return;
+                };
+
+                let doc_config = canvas.engine_ref().document.config.clone();
+                appwindow
+                    .document_config_preset_mut()
+                    .format
+                    .set_width(doc_config.format.width());
+                appwindow
+                    .document_config_preset_mut()
+                    .format
+                    .set_height(doc_config.format.height());
+                appwindow
+                    .document_config_preset_mut()
+                    .format
+                    .set_dpi(doc_config.format.dpi());
+
+                let widget_flags = WidgetFlags {
+                    refresh_ui: true,
+                    ..Default::default()
+                };
+                appwindow.handle_widget_flags(widget_flags, &canvas);
+            }
+        ));
+
+        imp.format_restore_preset_button
+            .get()
+            .connect_clicked(clone!(
+                #[weak]
+                appwindow,
+                move |_| {
+                    let Some(canvas) = appwindow.active_tab_canvas() else {
+                        return;
+                    };
+
+                    let doc_config = appwindow.document_config_preset_ref().clone();
+                    canvas
+                        .engine_mut()
+                        .document
+                        .config
+                        .format
+                        .set_width(doc_config.format.width());
+                    canvas
+                        .engine_mut()
+                        .document
+                        .config
+                        .format
+                        .set_height(doc_config.format.height());
+                    canvas
+                        .engine_mut()
+                        .document
+                        .config
+                        .format
+                        .set_dpi(doc_config.format.dpi());
+
+                    let mut widget_flags = canvas.engine_mut().doc_resize_autoexpand();
+                    widget_flags |= canvas.engine_mut().background_rendering_regenerate();
+                    widget_flags.refresh_ui = true;
+                    appwindow.handle_widget_flags(widget_flags, &canvas);
+                }
+            ));
+
         // revert format
-        imp.format_revert_button.get().connect_clicked(
-            clone!(@weak self as settings_panel, @weak appwindow => move |_format_revert_button| {
+        imp.format_revert_button.get().connect_clicked(clone!(
+            #[weak(rename_to=settings_panel)]
+            self,
+            #[weak]
+            appwindow,
+            move |_format_revert_button| {
                 settings_panel.revert_format(&appwindow);
-            }),
-        );
+            }
+        ));
 
         // Apply format
-        imp.format_apply_button.get().connect_clicked(
-            clone!(@weak self as settingspanel, @weak appwindow => move |_| {
+        imp.format_apply_button.get().connect_clicked(clone!(
+            #[weak(rename_to=settingspanel)]
+            self,
+            #[weak]
+            appwindow,
+            move |_| {
                 settingspanel.apply_format(&appwindow);
-            }),
-        );
+            }
+        ));
     }
 
     fn setup_doc(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
 
-        imp.doc_format_border_color_button.connect_rgba_notify(clone!(@weak self as settingspanel, @weak appwindow => move |button| {
-            let format_border_color = button.rgba().into_compose_color();
-            let canvas = appwindow.active_tab_wrapper().canvas();
+        imp.doc_save_preset_button.get().connect_clicked(clone!(
+            #[weak]
+            appwindow,
+            move |_| {
+                let Some(canvas) = appwindow.active_tab_canvas() else {
+                    return;
+                };
 
-            // Because the format border color is applied immediately to the engine,
-            // we need to update the temporary format too.
-            settingspanel.imp().temporary_format.borrow_mut().border_color = format_border_color;
-            let current_color = canvas.engine_ref().document.format.border_color;
+                let doc_config = canvas.engine_ref().document.config.clone();
+                appwindow.document_config_preset_mut().layout = doc_config.layout;
+                appwindow.document_config_preset_mut().format.border_color =
+                    doc_config.format.border_color;
+                appwindow.document_config_preset_mut().background.color =
+                    doc_config.background.color;
+                appwindow.document_config_preset_mut().background.pattern =
+                    doc_config.background.pattern;
+                appwindow
+                    .document_config_preset_mut()
+                    .background
+                    .pattern_size = doc_config.background.pattern_size;
+                appwindow
+                    .document_config_preset_mut()
+                    .background
+                    .pattern_color = doc_config.background.pattern_color;
+                appwindow.document_config_preset_mut().format.show_borders =
+                    doc_config.format.show_borders;
+                appwindow
+                    .document_config_preset_mut()
+                    .format
+                    .show_origin_indicator = doc_config.format.show_origin_indicator;
 
-            if !current_color.approx_eq_f32(format_border_color) {
-                canvas.engine_mut().document.format.border_color = format_border_color;
-                let mut widget_flags = canvas.engine_mut().update_rendering_current_viewport();
-                widget_flags.store_modified = true;
+                let widget_flags = WidgetFlags {
+                    refresh_ui: true,
+                    ..Default::default()
+                };
                 appwindow.handle_widget_flags(widget_flags, &canvas);
             }
-        }));
+        ));
 
-        imp.doc_background_color_button.connect_rgba_notify(
-            clone!(@weak appwindow => move |button| {
+        imp.doc_restore_preset_button.get().connect_clicked(clone!(
+            #[weak]
+            appwindow,
+            move |_| {
+                let Some(canvas) = appwindow.active_tab_canvas() else {
+                    return;
+                };
+
+                let doc_config = appwindow.document_config_preset_ref().clone();
+                canvas.engine_mut().document.config.layout = doc_config.layout;
+                canvas.engine_mut().document.config.format.border_color =
+                    doc_config.format.border_color;
+                canvas.engine_mut().document.config.background.color = doc_config.background.color;
+                canvas.engine_mut().document.config.background.pattern =
+                    doc_config.background.pattern;
+                canvas.engine_mut().document.config.background.pattern_size =
+                    doc_config.background.pattern_size;
+                canvas.engine_mut().document.config.background.pattern_color =
+                    doc_config.background.pattern_color;
+                canvas.engine_mut().document.config.format.show_borders =
+                    doc_config.format.show_borders;
+                canvas
+                    .engine_mut()
+                    .document
+                    .config
+                    .format
+                    .show_origin_indicator = doc_config.format.show_origin_indicator;
+
+                let mut widget_flags = canvas.engine_mut().doc_resize_autoexpand();
+                widget_flags |= canvas.engine_mut().background_rendering_regenerate();
+                widget_flags.refresh_ui = true;
+                appwindow.handle_widget_flags(widget_flags, &canvas);
+            }
+        ));
+
+        imp.doc_show_format_borders_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    let Some(canvas) = appwindow.active_tab_canvas() else {
+                        return;
+                    };
+                    canvas.engine_mut().document.config.format.show_borders = row.is_active();
+                    canvas.queue_draw();
+                }
+            ));
+
+        imp.doc_show_format_borders_row
+            .bind_property(
+                "active",
+                &imp.doc_format_border_color_button.get(),
+                "sensitive",
+            )
+            .sync_create()
+            .build();
+
+        imp.doc_format_border_color_button
+            .connect_rgba_notify(clone!(
+                #[weak(rename_to=settingspanel)]
+                self,
+                #[weak]
+                appwindow,
+                move |button| {
+                    let format_border_color = button.rgba().into_compose_color();
+                    let Some(canvas) = appwindow.active_tab_canvas() else {
+                        return;
+                    };
+
+                    // Because the format border color is applied immediately to the engine,
+                    // we need to update the temporary format too.
+                    settingspanel
+                        .imp()
+                        .temporary_format
+                        .borrow_mut()
+                        .border_color = format_border_color;
+                    let current_color = canvas.engine_ref().document.config.format.border_color;
+
+                    if !current_color.approx_eq_f32(format_border_color) {
+                        canvas.engine_mut().document.config.format.border_color =
+                            format_border_color;
+                        let mut widget_flags =
+                            canvas.engine_mut().update_rendering_current_viewport();
+                        widget_flags.store_modified = true;
+                        appwindow.handle_widget_flags(widget_flags, &canvas);
+                    }
+                }
+            ));
+
+        imp.doc_background_color_button.connect_rgba_notify(clone!(
+            #[weak]
+            appwindow,
+            move |button| {
                 let background_color = button.rgba().into_compose_color();
-                let canvas = appwindow.active_tab_wrapper().canvas();
+                let Some(canvas) = appwindow.active_tab_canvas() else {
+                    return;
+                };
 
-                if !canvas.engine_ref().document.background.color.approx_eq_f32(background_color) {
-                    canvas.engine_mut().document.background.color = background_color;
+                if !canvas
+                    .engine_ref()
+                    .document
+                    .config
+                    .background
+                    .color
+                    .approx_eq_f32(background_color)
+                {
+                    canvas.engine_mut().document.config.background.color = background_color;
                     let mut widget_flags = canvas.engine_mut().background_rendering_regenerate();
                     widget_flags.store_modified = true;
                     appwindow.handle_widget_flags(widget_flags, &canvas);
                 }
-            }),
-        );
+            }
+        ));
 
         imp.doc_document_layout_row
             .get()
-            .connect_selected_item_notify(
-                clone!(@weak self as settings_panel, @weak appwindow => move |_| {
+            .connect_selected_item_notify(clone!(
+                #[weak(rename_to=settings_panel)]
+                self,
+                #[weak]
+                appwindow,
+                move |_| {
                     let document_layout = settings_panel.document_layout();
-                    let canvas = appwindow.active_tab_wrapper().canvas();
+                    let Some(canvas) = appwindow.active_tab_canvas() else {
+                        return;
+                    };
 
                     appwindow
                         .main_header()
@@ -652,120 +944,252 @@ impl RnSettingsPanel {
                         .fixedsize_quickactions_box()
                         .set_sensitive(document_layout == Layout::FixedSize);
 
-                    if canvas.engine_ref().document.layout != document_layout {
+                    if canvas.engine_ref().document.config.layout != document_layout {
                         let mut widget_flags = canvas.engine_mut().set_doc_layout(document_layout);
                         widget_flags.store_modified = true;
                         appwindow.handle_widget_flags(widget_flags, &canvas);
                     }
-                }),
-            );
-
-        imp.doc_background_patterns_row.get().connect_selected_item_notify(clone!(@weak self as settings_panel, @weak appwindow => move |_| {
-            let pattern = settings_panel.background_pattern();
-            let canvas = appwindow.active_tab_wrapper().canvas();
-
-            match pattern {
-                PatternStyle::None => {
-                    settings_panel.imp().doc_background_pattern_width_unitentry.set_sensitive(false);
-                    settings_panel.imp().doc_background_pattern_height_unitentry.set_sensitive(false);
-                },
-                PatternStyle::Lines => {
-                    settings_panel.imp().doc_background_pattern_width_unitentry.set_sensitive(false);
-                    settings_panel.imp().doc_background_pattern_height_unitentry.set_sensitive(true);
-                },
-                PatternStyle::Grid => {
-                    settings_panel.imp().doc_background_pattern_width_unitentry.set_sensitive(true);
-                    settings_panel.imp().doc_background_pattern_height_unitentry.set_sensitive(true);
-                },
-                PatternStyle::Dots => {
-                    settings_panel.imp().doc_background_pattern_width_unitentry.set_sensitive(true);
-                    settings_panel.imp().doc_background_pattern_height_unitentry.set_sensitive(true);
-                },
-                PatternStyle::IsometricGrid => {
-                    settings_panel.imp().doc_background_pattern_width_unitentry.set_sensitive(false);
-                    settings_panel.imp().doc_background_pattern_height_unitentry.set_sensitive(true);
-                },
-                PatternStyle::IsometricDots => {
-                    settings_panel.imp().doc_background_pattern_width_unitentry.set_sensitive(false);
-                    settings_panel.imp().doc_background_pattern_height_unitentry.set_sensitive(true);
-                },
-            }
-
-            if canvas.engine_ref().document.background.pattern != pattern {
-                canvas.engine_mut().document.background.pattern = pattern;
-                let mut widget_flags = canvas.engine_mut().background_rendering_regenerate();
-                widget_flags.store_modified = true;
-                appwindow.handle_widget_flags(widget_flags, &canvas);
-            }
-        }));
-
-        imp.doc_background_pattern_color_button.connect_rgba_notify(
-            clone!(@weak appwindow => move |button| {
-                let canvas = appwindow.active_tab_wrapper().canvas();
-                let pattern_color = button.rgba().into_compose_color();
-
-                if !canvas.engine_ref().document.background.pattern_color.approx_eq_f32(pattern_color) {
-                    canvas.engine_mut().document.background.pattern_color = pattern_color;
-                    let mut widget_flags = canvas.engine_mut().background_rendering_regenerate();
-                    widget_flags.store_modified = true;
-                    appwindow.handle_widget_flags(widget_flags, &canvas);
                 }
-            }),
-        );
+            ));
+
+        imp.doc_background_patterns_row
+            .get()
+            .connect_selected_item_notify(clone!(
+                #[weak(rename_to=settings_panel)]
+                self,
+                #[weak]
+                appwindow,
+                move |_| {
+                    let pattern = settings_panel.background_pattern();
+                    let Some(canvas) = appwindow.active_tab_canvas() else {
+                        return;
+                    };
+
+                    match pattern {
+                        PatternStyle::None => {
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_width_unitentry
+                                .set_sensitive(false);
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_height_unitentry
+                                .set_sensitive(false);
+                        }
+                        PatternStyle::Lines => {
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_width_unitentry
+                                .set_sensitive(false);
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_height_unitentry
+                                .set_sensitive(true);
+                        }
+                        PatternStyle::Grid => {
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_width_unitentry
+                                .set_sensitive(true);
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_height_unitentry
+                                .set_sensitive(true);
+                        }
+                        PatternStyle::Dots => {
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_width_unitentry
+                                .set_sensitive(true);
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_height_unitentry
+                                .set_sensitive(true);
+                        }
+                        PatternStyle::IsometricGrid => {
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_width_unitentry
+                                .set_sensitive(false);
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_height_unitentry
+                                .set_sensitive(true);
+                        }
+                        PatternStyle::IsometricDots => {
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_width_unitentry
+                                .set_sensitive(false);
+                            settings_panel
+                                .imp()
+                                .doc_background_pattern_height_unitentry
+                                .set_sensitive(true);
+                        }
+                    }
+
+                    if canvas.engine_ref().document.config.background.pattern != pattern {
+                        canvas.engine_mut().document.config.background.pattern = pattern;
+                        let mut widget_flags =
+                            canvas.engine_mut().background_rendering_regenerate();
+                        widget_flags.store_modified = true;
+                        appwindow.handle_widget_flags(widget_flags, &canvas);
+                    }
+                }
+            ));
+
+        imp.doc_background_pattern_color_button
+            .connect_rgba_notify(clone!(
+                #[weak]
+                appwindow,
+                move |button| {
+                    let Some(canvas) = appwindow.active_tab_canvas() else {
+                        return;
+                    };
+                    let pattern_color = button.rgba().into_compose_color();
+
+                    if !canvas
+                        .engine_ref()
+                        .document
+                        .config
+                        .background
+                        .pattern_color
+                        .approx_eq_f32(pattern_color)
+                    {
+                        canvas.engine_mut().document.config.background.pattern_color =
+                            pattern_color;
+                        let mut widget_flags =
+                            canvas.engine_mut().background_rendering_regenerate();
+                        widget_flags.store_modified = true;
+                        appwindow.handle_widget_flags(widget_flags, &canvas);
+                    }
+                }
+            ));
 
         imp.doc_background_pattern_width_unitentry
             .get()
             .connect_notify_local(
                 Some("value"),
-                clone!(@weak self as settings_panel, @weak appwindow => move |unit_entry, _| {
-                        let canvas = appwindow.active_tab_wrapper().canvas();
-                        let mut pattern_size = canvas.engine_ref().document.background.pattern_size;
+                clone!(
+                    #[weak]
+                    appwindow,
+                    move |unit_entry, _| {
+                        let Some(canvas) = appwindow.active_tab_canvas() else {
+                            return;
+                        };
+                        let mut pattern_size =
+                            canvas.engine_ref().document.config.background.pattern_size;
                         pattern_size[0] = unit_entry.value_in_px();
 
-                        if !canvas.engine_ref().document.background.pattern_size.approx_eq(&pattern_size) {
-                            canvas.engine_mut().document.background.pattern_size = pattern_size;
-                            let mut widget_flags = canvas.engine_mut().background_rendering_regenerate();
+                        if !canvas
+                            .engine_ref()
+                            .document
+                            .config
+                            .background
+                            .pattern_size
+                            .approx_eq(&pattern_size)
+                        {
+                            canvas.engine_mut().document.config.background.pattern_size =
+                                pattern_size;
+                            let mut widget_flags =
+                                canvas.engine_mut().background_rendering_regenerate();
                             widget_flags.store_modified = true;
                             appwindow.handle_widget_flags(widget_flags, &canvas);
                         }
-                }),
+                    }
+                ),
             );
 
         imp.doc_background_pattern_height_unitentry
             .get()
             .connect_notify_local(
                 Some("value"),
-                clone!(@weak self as settings_panel, @weak appwindow => move |unit_entry, _| {
-                        let canvas = appwindow.active_tab_wrapper().canvas();
-                        let mut pattern_size = canvas.engine_ref().document.background.pattern_size;
+                clone!(
+                    #[weak]
+                    appwindow,
+                    move |unit_entry, _| {
+                        let Some(canvas) = appwindow.active_tab_canvas() else {
+                            return;
+                        };
+                        let mut pattern_size =
+                            canvas.engine_ref().document.config.background.pattern_size;
                         pattern_size[1] = unit_entry.value_in_px();
 
-                        if !canvas.engine_ref().document.background.pattern_size.approx_eq(&pattern_size) {
-                            canvas.engine_mut().document.background.pattern_size = pattern_size;
-                            let mut widget_flags = canvas.engine_mut().background_rendering_regenerate();
+                        if !canvas
+                            .engine_ref()
+                            .document
+                            .config
+                            .background
+                            .pattern_size
+                            .approx_eq(&pattern_size)
+                        {
+                            canvas.engine_mut().document.config.background.pattern_size =
+                                pattern_size;
+                            let mut widget_flags =
+                                canvas.engine_mut().background_rendering_regenerate();
                             widget_flags.store_modified = true;
                             appwindow.handle_widget_flags(widget_flags, &canvas);
                         }
-                }),
+                    }
+                ),
             );
 
-        imp.background_pattern_invert_color_button.get().connect_clicked(
-                clone!(@weak self as settings_panel, @weak appwindow => move |_| {
-                    let canvas = appwindow.active_tab_wrapper().canvas();
+        imp.doc_show_origin_indicator_row
+            .connect_active_notify(clone!(
+                #[weak]
+                appwindow,
+                move |row| {
+                    let Some(canvas) = appwindow.active_tab_canvas() else {
+                        return;
+                    };
+                    canvas
+                        .engine_mut()
+                        .document
+                        .config
+                        .format
+                        .show_origin_indicator = row.is_active();
+                    canvas.queue_draw();
+                }
+            ));
+
+        imp.background_pattern_invert_color_button
+            .get()
+            .connect_clicked(clone!(
+                #[weak]
+                appwindow,
+                move |_| {
+                    let Some(canvas) = appwindow.active_tab_canvas() else {
+                        return;
+                    };
 
                     let mut widget_flags = {
                         let mut engine = canvas.engine_mut();
-                        engine.document.background.color = engine.document.background.color.to_inverted_brightness_color();
-                        engine.document.background.pattern_color = engine.document.background.pattern_color.to_inverted_brightness_color();
-                        engine.document.format.border_color = engine.document.format.border_color.to_inverted_brightness_color();
+                        engine.document.config.background.color = engine
+                            .document
+                            .config
+                            .background
+                            .color
+                            .to_inverted_brightness_color();
+                        engine.document.config.background.pattern_color = engine
+                            .document
+                            .config
+                            .background
+                            .pattern_color
+                            .to_inverted_brightness_color();
+                        engine.document.config.format.border_color = engine
+                            .document
+                            .config
+                            .format
+                            .border_color
+                            .to_inverted_brightness_color();
                         engine.background_rendering_regenerate()
                     };
 
                     widget_flags.refresh_ui = true;
                     widget_flags.store_modified = true;
                     appwindow.handle_widget_flags(widget_flags, &canvas);
-                }),
-            );
+                }
+            ));
     }
 
     fn setup_shortcuts(&self, appwindow: &RnAppWindow) {
@@ -785,78 +1209,257 @@ impl RnSettingsPanel {
         let penshortcut_drawing_pad_button_2 = imp.penshortcut_drawing_pad_button_2.get();
         let penshortcut_drawing_pad_button_3 = imp.penshortcut_drawing_pad_button_3.get();
 
-        imp.penshortcut_stylus_button_primary_row.connect_local("action-changed", false, clone!(@weak penshortcut_stylus_button_primary_row, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_stylus_button_primary_row.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::StylusPrimaryButton, action);
-            None
-        }));
+        imp.penshortcut_stylus_button_primary_row.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_stylus_button_primary_row,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_stylus_button_primary_row.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::StylusPrimaryButton, action);
+                    None
+                }
+            ),
+        );
 
-        imp.penshortcut_stylus_button_secondary_row.connect_local("action-changed", false, clone!(@weak penshortcut_stylus_button_secondary_row, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_stylus_button_secondary_row.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::StylusSecondaryButton, action);
-            None
-        }));
+        imp.penshortcut_stylus_button_secondary_row.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_stylus_button_secondary_row,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_stylus_button_secondary_row.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::StylusSecondaryButton, action);
+                    None
+                }
+            ),
+        );
 
-        imp.penshortcut_mouse_button_secondary_row.connect_local("action-changed", false, clone!(@weak penshortcut_mouse_button_secondary_row, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_mouse_button_secondary_row.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::MouseSecondaryButton, action);
-            None
-        }));
+        imp.penshortcut_mouse_button_secondary_row.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_mouse_button_secondary_row,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_mouse_button_secondary_row.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::MouseSecondaryButton, action);
+                    None
+                }
+            ),
+        );
 
-        imp.penshortcut_mouse_button_backward_row.connect_local("action-changed", false, clone!(@weak penshortcut_mouse_button_backward_row, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_mouse_button_backward_row.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::MouseBackwardButton, action);
-            None
-        }));
+        imp.penshortcut_mouse_button_backward_row.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_mouse_button_backward_row,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_mouse_button_backward_row.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::MouseBackwardButton, action);
+                    None
+                }
+            ),
+        );
 
-        imp.penshortcut_mouse_button_forward_row.connect_local("action-changed", false, clone!(@weak penshortcut_mouse_button_forward_row, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_mouse_button_forward_row.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::MouseForwardButton, action);
-            None
-        }));
+        imp.penshortcut_mouse_button_forward_row.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_mouse_button_forward_row,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_mouse_button_forward_row.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::MouseForwardButton, action);
+                    None
+                }
+            ),
+        );
 
-        imp.penshortcut_touch_two_finger_long_press_row.connect_local("action-changed", false, clone!(@weak penshortcut_touch_two_finger_long_press_row, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_touch_two_finger_long_press_row.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::TouchTwoFingerLongPress, action);
-            None
-        }));
+        imp.penshortcut_touch_two_finger_long_press_row
+            .connect_local(
+                "action-changed",
+                false,
+                clone!(
+                    #[weak]
+                    penshortcut_touch_two_finger_long_press_row,
+                    #[weak]
+                    appwindow,
+                    #[upgrade_or]
+                    None,
+                    move |_values| {
+                        let action = penshortcut_touch_two_finger_long_press_row.action();
+                        appwindow
+                            .engine_config()
+                            .write()
+                            .pens_config
+                            .register_shortcut(ShortcutKey::TouchTwoFingerLongPress, action);
+                        None
+                    }
+                ),
+            );
 
-        imp.penshortcut_keyboard_ctrl_space_row.connect_local("action-changed", false, clone!(@weak penshortcut_keyboard_ctrl_space_row, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_keyboard_ctrl_space_row.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::KeyboardCtrlSpace, action);
-            None
-        }));
+        imp.penshortcut_keyboard_ctrl_space_row.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_keyboard_ctrl_space_row,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_keyboard_ctrl_space_row.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::KeyboardCtrlSpace, action);
+                    None
+                }
+            ),
+        );
 
-        imp.penshortcut_drawing_pad_button_0.connect_local("action-changed", false, clone!(@weak penshortcut_drawing_pad_button_0, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_drawing_pad_button_0.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::DrawingPadButton0, action);
-            None
-        }));
+        imp.penshortcut_drawing_pad_button_0.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_drawing_pad_button_0,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_drawing_pad_button_0.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::DrawingPadButton0, action);
+                    None
+                }
+            ),
+        );
 
-        imp.penshortcut_drawing_pad_button_1.connect_local("action-changed", false, clone!(@weak penshortcut_drawing_pad_button_1, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_drawing_pad_button_1.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::DrawingPadButton1, action);
-            None
-        }));
+        imp.penshortcut_drawing_pad_button_1.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_drawing_pad_button_1,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_drawing_pad_button_1.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::DrawingPadButton1, action);
+                    None
+                }
+            ),
+        );
 
-        imp.penshortcut_drawing_pad_button_2.connect_local("action-changed", false, clone!(@weak penshortcut_drawing_pad_button_2, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_drawing_pad_button_2.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::DrawingPadButton2, action);
-            None
-        }));
+        imp.penshortcut_drawing_pad_button_2.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_drawing_pad_button_2,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_drawing_pad_button_2.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::DrawingPadButton2, action);
+                    None
+                }
+            ),
+        );
 
-        imp.penshortcut_drawing_pad_button_3.connect_local("action-changed", false, clone!(@weak penshortcut_drawing_pad_button_3, @weak appwindow => @default-return None, move |_values| {
-            let action = penshortcut_drawing_pad_button_3.action();
-            appwindow.active_tab_wrapper().canvas().engine_mut().penholder.register_shortcut(ShortcutKey::DrawingPadButton3, action);
-            None
-        }));
+        imp.penshortcut_drawing_pad_button_3.connect_local(
+            "action-changed",
+            false,
+            clone!(
+                #[weak]
+                penshortcut_drawing_pad_button_3,
+                #[weak]
+                appwindow,
+                #[upgrade_or]
+                None,
+                move |_values| {
+                    let action = penshortcut_drawing_pad_button_3.action();
+                    appwindow
+                        .engine_config()
+                        .write()
+                        .pens_config
+                        .register_shortcut(ShortcutKey::DrawingPadButton3, action);
+                    None
+                }
+            ),
+        );
     }
 
     fn revert_format(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
-        let canvas = appwindow.active_tab_wrapper().canvas();
-        *imp.temporary_format.borrow_mut() = canvas.engine_ref().document.format;
-        let revert_format = canvas.engine_ref().document.format;
+        let Some(canvas) = appwindow.active_tab_canvas() else {
+            return;
+        };
+        *imp.temporary_format.borrow_mut() = canvas.engine_ref().document.config.format;
+        let revert_format = canvas.engine_ref().document.config.format;
 
         self.set_format_predefined_format_variant(format::PredefinedFormat::Custom);
         imp.format_dpi_adj.set_value(revert_format.dpi());
@@ -870,7 +1473,9 @@ impl RnSettingsPanel {
 
     fn apply_format(&self, appwindow: &RnAppWindow) {
         let imp = self.imp();
-        let canvas = appwindow.active_tab_wrapper().canvas();
+        let Some(canvas) = appwindow.active_tab_canvas() else {
+            return;
+        };
         let temporary_format = *imp.temporary_format.borrow();
 
         imp.doc_background_pattern_width_unitentry
@@ -878,7 +1483,7 @@ impl RnSettingsPanel {
         imp.doc_background_pattern_height_unitentry
             .set_dpi_keep_value(temporary_format.dpi());
 
-        canvas.engine_mut().document.format = temporary_format;
+        canvas.engine_mut().document.config.format = temporary_format;
         let mut widget_flags = canvas.engine_mut().doc_resize_to_fit_content();
         widget_flags.store_modified = true;
         appwindow.handle_widget_flags(widget_flags, &canvas);

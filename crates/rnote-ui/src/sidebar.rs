@@ -1,7 +1,7 @@
 // Imports
 use crate::{RnAppMenu, RnAppWindow, RnSettingsPanel, RnWorkspaceBrowser};
 use gtk4::{
-    glib, glib::clone, prelude::*, subclass::prelude::*, Button, CompositeTemplate, Widget,
+    Button, CompositeTemplate, Widget, glib, glib::clone, prelude::*, subclass::prelude::*,
 };
 
 mod imp {
@@ -59,7 +59,7 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnSidebar(ObjectSubclass<imp::RnSidebar>)
-        @extends gtk4::Widget,
+        @extends Widget,
         @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 
@@ -109,13 +109,19 @@ impl RnSidebar {
         imp.workspacebrowser.get().init(appwindow);
         imp.settings_panel.get().init(appwindow);
 
-        imp.left_close_button
-            .connect_clicked(clone!(@weak appwindow => move |_| {
+        imp.left_close_button.connect_clicked(clone!(
+            #[weak]
+            appwindow,
+            move |_| {
                 appwindow.split_view().set_show_sidebar(false);
-            }));
-        imp.right_close_button
-            .connect_clicked(clone!(@weak appwindow => move |_| {
+            }
+        ));
+        imp.right_close_button.connect_clicked(clone!(
+            #[weak]
+            appwindow,
+            move |_| {
                 appwindow.split_view().set_show_sidebar(false);
-            }));
+            }
+        ));
     }
 }

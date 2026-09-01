@@ -1,9 +1,9 @@
 // Imports
 use cairo::glib::closure;
 use gtk4::{
-    glib, glib::clone, prelude::*, subclass::prelude::*, Align, CompositeTemplate,
-    ConstantExpression, GridView, IconSize, Image, Label, ListItem, PropertyExpression,
-    SignalListItemFactory, SingleSelection, StringList, StringObject, Widget,
+    Align, CompositeTemplate, ConstantExpression, GridView, IconSize, Image, Label, ListItem,
+    PropertyExpression, SignalListItemFactory, SingleSelection, StringList, StringObject, Widget,
+    glib, glib::clone, prelude::*, subclass::prelude::*,
 };
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
@@ -69,9 +69,11 @@ mod imp {
         fn properties() -> &'static [glib::ParamSpec] {
             static PROPERTIES: Lazy<Vec<glib::ParamSpec>> = Lazy::new(|| {
                 // we can use it to represent Option<String>
-                vec![glib::ParamSpecString::builder("picked")
-                    .default_value(None)
-                    .build()]
+                vec![
+                    glib::ParamSpecString::builder("picked")
+                        .default_value(None)
+                        .build(),
+                ]
             });
             PROPERTIES.as_ref()
         }
@@ -103,7 +105,7 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnIconPicker(ObjectSubclass<imp::RnIconPicker>)
-        @extends gtk4::Widget,
+        @extends Widget,
         @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 
@@ -159,8 +161,8 @@ impl RnIconPicker {
 
     /// Internal function to set the picked icon
     fn set_picked_intern(&self, picked: Option<String>) {
-        if let (Some(selection), Some(list)) =
-            (&*self.imp().selection.borrow(), &*self.imp().list.borrow())
+        if let Some(selection) = &*self.imp().selection.borrow()
+            && let Some(list) = &*self.imp().list.borrow()
         {
             if let Some(picked) = picked {
                 let item = list
@@ -203,22 +205,26 @@ impl RnIconPicker {
         let generate_display_name = generate_display_name_option.unwrap_or(|_| String::new());
 
         self.imp().selected_handlerid.borrow_mut().replace(
-            single_selection.connect_selected_item_notify(
-                clone!(@weak self as iconpicker => move |_| {
+            single_selection.connect_selected_item_notify(clone!(
+                #[weak(rename_to=iconpicker)]
+                self,
+                move |_| {
                     let pick = iconpicker.picked_intern();
 
                     if show_display_name && show_selection_label {
                         if let Some(icon_name) = &pick {
                             iconpicker.set_selection_label_visible(true);
-                            iconpicker.set_selection_label_text(generate_display_name(icon_name.as_str()));
+                            iconpicker.set_selection_label_text(generate_display_name(
+                                icon_name.as_str(),
+                            ));
                         } else {
                             iconpicker.set_selection_label_visible(false);
                         }
                     }
 
                     iconpicker.set_picked(pick);
-                }),
-            ),
+                }
+            )),
         );
 
         // Factory

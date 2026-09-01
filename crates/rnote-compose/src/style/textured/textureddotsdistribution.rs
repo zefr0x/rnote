@@ -11,6 +11,7 @@ use std::ops::Range;
     PartialEq,
     Clone,
     Copy,
+    Default,
     Serialize,
     Deserialize,
     num_derive::FromPrimitive,
@@ -20,17 +21,12 @@ pub enum TexturedDotsDistribution {
     /// Uniform distribution.
     Uniform = 0,
     /// Normal distribution.
+    #[default]
     Normal,
     /// Exponential distribution distribution, from the outline increasing in probability symmetrical to the center.
     Exponential,
     /// Exponential distribution distribution, from the center increasing in probability symmetrical outwards to the outline.
     ReverseExponential,
-}
-
-impl Default for TexturedDotsDistribution {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 impl TryFrom<u32> for TexturedDotsDistribution {
@@ -53,7 +49,9 @@ impl TexturedDotsDistribution {
         range: Range<f64>,
     ) -> f64 {
         let sample = match self {
-            Self::Uniform => rand_distr::Uniform::from(range.clone()).sample(rng),
+            Self::Uniform => rand_distr::Uniform::try_from(range.clone())
+                .unwrap()
+                .sample(rng),
             Self::Normal => {
                 // the mean to the mid of the range
                 let mean = (range.end + range.start) * 0.5;
@@ -68,7 +66,7 @@ impl TexturedDotsDistribution {
                 // The lambda
                 let lambda = 1.0;
 
-                let sign: f64 = if rand_distr::Standard.sample(rng) {
+                let sign: f64 = if rand_distr::StandardUniform.sample(rng) {
                     1.0
                 } else {
                     -1.0
@@ -81,7 +79,7 @@ impl TexturedDotsDistribution {
                 // The lambda
                 let lambda = 1.0;
 
-                let positive: bool = rand_distr::Standard.sample(rng);
+                let positive: bool = rand_distr::StandardUniform.sample(rng);
                 let sign = if positive { 1.0 } else { -1.0 };
                 let offset = if positive { range.start } else { range.end };
 
@@ -91,7 +89,7 @@ impl TexturedDotsDistribution {
 
         if !range.contains(&sample) {
             // Do a uniform distribution as fallback if sample is out of range
-            rand_distr::Uniform::from(range).sample(rng)
+            rand_distr::Uniform::try_from(range).unwrap().sample(rng)
         } else {
             sample
         }

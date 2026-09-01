@@ -1,7 +1,7 @@
 // Imports
 use gtk4::{
-    glib, glib::clone, prelude::*, subclass::prelude::*, CompositeTemplate, DropDown,
-    EventControllerScroll, PropagationPhase, SpinButton, Widget,
+    CompositeTemplate, DropDown, EventControllerScroll, PropagationPhase, SpinButton, Widget, glib,
+    glib::clone, prelude::*, subclass::prelude::*,
 };
 use num_traits::ToPrimitive;
 use once_cell::sync::Lazy;
@@ -91,11 +91,13 @@ mod imp {
                     .set_selected(unit_entry.unit().to_u32().unwrap());
             });
 
-            self.unit_dropdown.get().connect_selected_notify(
-                clone!(@weak obj as unit_entry => move |unit_dropdown| {
+            self.unit_dropdown.get().connect_selected_notify(clone!(
+                #[weak(rename_to=unit_entry)]
+                obj,
+                move |unit_dropdown| {
                     unit_entry.set_unit(MeasureUnit::try_from(unit_dropdown.selected()).unwrap());
-                }),
-            );
+                }
+            ));
         }
 
         fn dispose(&self) {
@@ -244,7 +246,7 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnUnitEntry(ObjectSubclass<imp::RnUnitEntry>)
-        @extends gtk4::Widget,
+        @extends Widget,
         @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 

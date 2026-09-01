@@ -8,12 +8,14 @@ use crate::canvas::RnCanvas;
 use crate::canvaswrapper::RnCanvasWrapper;
 use crate::config;
 use crate::workspacebrowser::workspacesbar::RnWorkspaceRow;
-use crate::{globals, RnIconPicker};
+use crate::{RnIconPicker, globals};
 use adw::prelude::*;
 use gettextrs::{gettext, pgettext};
+#[allow(deprecated)]
+use gtk4::ShortcutsWindow;
 use gtk4::{
-    gio, glib, glib::clone, Builder, Button, CheckButton, ColorDialogButton, FileDialog, Label,
-    MenuButton, ShortcutsWindow, StringList,
+    Builder, Button, CheckButton, ColorDialogButton, FileDialog, Label, MenuButton, StringList,
+    gio, glib, glib::clone,
 };
 use tracing::{debug, error, warn};
 
@@ -44,12 +46,13 @@ pub(crate) fn dialog_about(appwindow: &RnAppWindow) {
         aboutdialog.add_css_class("devel");
     }
 
-    aboutdialog.present(appwindow);
+    aboutdialog.present(appwindow.root().as_ref());
 }
 
 pub(crate) fn dialog_keyboard_shortcuts(appwindow: &RnAppWindow) {
     let builder =
         Builder::from_resource((String::from(config::APP_IDPATH) + "ui/shortcuts.ui").as_str());
+    #[allow(deprecated)]
     let dialog: ShortcutsWindow = builder.object("shortcuts_window").unwrap();
     dialog.set_transient_for(Some(appwindow));
     dialog.present();
@@ -61,7 +64,7 @@ pub(crate) async fn dialog_clear_doc(appwindow: &RnAppWindow, canvas: &RnCanvas)
     );
     let dialog: adw::AlertDialog = builder.object("dialog_clear_doc").unwrap();
 
-    match dialog.choose_future(appwindow).await.as_str() {
+    match dialog.choose_future(Some(appwindow)).await.as_str() {
         "clear" => {
             let prev_empty = canvas.empty();
 
@@ -100,34 +103,44 @@ pub(crate) async fn dialog_new_doc(appwindow: &RnAppWindow, canvas: &RnCanvas) {
         return;
     }
 
-    match dialog.choose_future(appwindow).await.as_str() {
+    match dialog.choose_future(Some(appwindow)).await.as_str() {
         "discard" => {
             new_doc(appwindow, canvas);
         }
         "save" => {
-            glib::spawn_future_local(clone!(@weak canvas, @weak appwindow => async move {
-                if let Some(output_file) = canvas.output_file() {
-                    appwindow.overlays().progressbar_start_pulsing();
+            glib::spawn_future_local(clone!(
+                #[weak]
+                canvas,
+                #[weak]
+                appwindow,
+                async move {
+                    if let Some(output_file) = canvas.output_file() {
+                        appwindow.overlays().progressbar_start_pulsing();
 
-                    if let Err(e) = canvas.save_document_to_file(&output_file).await {
-                        error!("Saving document failed before creating new document, Err: {e:?}");
-                        canvas.set_output_file(None);
-                        appwindow.overlays().dispatch_toast_error(&gettext("Saving document failed"));
-                        appwindow.overlays().progressbar_abort();
+                        if let Err(e) = canvas.save_document_to_file(&output_file).await {
+                            error!(
+                                "Saving document failed before creating new document, Err: {e:?}"
+                            );
+                            canvas.set_output_file(None);
+                            appwindow
+                                .overlays()
+                                .dispatch_toast_error(&gettext("Saving document failed"));
+                            appwindow.overlays().progressbar_abort();
+                        } else {
+                            appwindow.overlays().progressbar_finish();
+                        }
+                        // No success toast on saving without dialog, success is already indicated in the header title
+
+                        // only create new document if saving was successful
+                        if !canvas.unsaved_changes() {
+                            new_doc(&appwindow, &canvas);
+                        }
                     } else {
-                        appwindow.overlays().progressbar_finish();
+                        // Open a dialog to choose a save location
+                        export::dialog_save_doc_as(&appwindow, &canvas).await;
                     }
-                    // No success toast on saving without dialog, success is already indicated in the header title
-
-                    // only create new document if saving was successful
-                    if !canvas.unsaved_changes() {
-                        new_doc(&appwindow, &canvas);
-                    }
-                } else {
-                    // Open a dialog to choose a save location
-                    export::dialog_save_doc_as(&appwindow, &canvas).await;
                 }
-            }));
+            ));
         }
         _ => {
             // Cancel
@@ -165,25 +178,25 @@ pub(crate) async fn dialog_close_tab(appwindow: &RnAppWindow, tab_page: &adw::Ta
     };
 
     // Handle possible file collisions for new files
-    if save_file.is_none() {
-        if let Some(save_folder_path) = save_folder_path.as_ref() {
-            let base_title = canvas.doc_title_display();
-            let mut test_save_file =
-                gio::File::for_path(save_folder_path.join(base_title.clone() + ".rnote"));
-            let mut doc_postfix = 0;
+    if save_file.is_none()
+        && let Some(save_folder_path) = save_folder_path.as_ref()
+    {
+        let base_title = canvas.doc_title_display();
+        let mut test_save_file =
+            gio::File::for_path(save_folder_path.join(base_title.clone() + ".rnote"));
+        let mut doc_postfix = 0;
 
-            // increment as long as as files with same name exist
-            while gio::File::query_exists(&test_save_file, gio::Cancellable::NONE) {
-                doc_postfix += 1;
-                test_save_file = gio::File::for_path(save_folder_path.join(
-                    base_title.clone()
-                        + crate::utils::FILE_DUP_SUFFIX_DELIM
-                        + &doc_postfix.to_string()
-                        + ".rnote",
-                ));
-            }
-            save_file = Some(test_save_file);
+        // increment as long as as files with same name exist
+        while gio::File::query_exists(&test_save_file, gio::Cancellable::NONE) {
+            doc_postfix += 1;
+            test_save_file = gio::File::for_path(save_folder_path.join(
+                base_title.clone()
+                    + crate::utils::FILE_DUP_SUFFIX_DELIM
+                    + &doc_postfix.to_string()
+                    + ".rnote",
+            ));
         }
+        save_file = Some(test_save_file);
     }
 
     let save_file_display_name = save_file
@@ -211,7 +224,7 @@ pub(crate) async fn dialog_close_tab(appwindow: &RnAppWindow, tab_page: &adw::Ta
     prefix_box.append(&check);
     if canvas_output_file.is_some() {
         // Indicate that a new existing file will be saved
-        let icon_image = gtk4::Image::from_icon_name("doc-save-symbolic");
+        let icon_image = gtk4::Image::from_icon_name("save-symbolic");
         icon_image.set_tooltip_text(Some(&gettext("The changes will be saved")));
         prefix_box.append(&icon_image);
     } else {
@@ -230,7 +243,7 @@ pub(crate) async fn dialog_close_tab(appwindow: &RnAppWindow, tab_page: &adw::Ta
 
     // Returns close_finish_confirm, a boolean that indicates if the tab should actually be closed or closing
     // should be aborted.
-    match dialog.choose_future(appwindow).await.as_str() {
+    match dialog.choose_future(Some(appwindow)).await.as_str() {
         "discard" => true,
         "save" => {
             if let Some(save_file) = save_file {
@@ -289,34 +302,34 @@ pub(crate) async fn dialog_close_window(appwindow: &RnAppWindow) {
         };
 
         // Handle possible file collisions for new files
-        if canvas_output_file.is_none() {
-            if let Some(save_folder_path) = save_folder_path.as_ref() {
-                let base_title = canvas.doc_title_display();
-                let mut test_save_file = if doc_postfix == 0 {
-                    gio::File::for_path(save_folder_path.join(base_title.clone() + ".rnote"))
-                } else {
-                    gio::File::for_path(save_folder_path.join(
-                        base_title.clone()
-                            + crate::utils::FILE_DUP_SUFFIX_DELIM
-                            + &doc_postfix.to_string()
-                            + ".rnote",
-                    ))
-                };
+        if canvas_output_file.is_none()
+            && let Some(save_folder_path) = save_folder_path.as_ref()
+        {
+            let base_title = canvas.doc_title_display();
+            let mut test_save_file = if doc_postfix == 0 {
+                gio::File::for_path(save_folder_path.join(base_title.clone() + ".rnote"))
+            } else {
+                gio::File::for_path(save_folder_path.join(
+                    base_title.clone()
+                        + crate::utils::FILE_DUP_SUFFIX_DELIM
+                        + &doc_postfix.to_string()
+                        + ".rnote",
+                ))
+            };
 
-                // increment as long as as files with same name exist
-                while gio::File::query_exists(&test_save_file, gio::Cancellable::NONE) {
-                    doc_postfix += 1;
-                    test_save_file = gio::File::for_path(save_folder_path.join(
-                        base_title.clone()
-                            + crate::utils::FILE_DUP_SUFFIX_DELIM
-                            + &doc_postfix.to_string()
-                            + ".rnote",
-                    ));
-                }
-                save_file = Some(test_save_file);
-                // increment for next iteration
+            // increment as long as as files with same name exist
+            while gio::File::query_exists(&test_save_file, gio::Cancellable::NONE) {
                 doc_postfix += 1;
+                test_save_file = gio::File::for_path(save_folder_path.join(
+                    base_title.clone()
+                        + crate::utils::FILE_DUP_SUFFIX_DELIM
+                        + &doc_postfix.to_string()
+                        + ".rnote",
+                ));
             }
+            save_file = Some(test_save_file);
+            // increment for next iteration
+            doc_postfix += 1;
         }
 
         let save_file_display_name = save_file
@@ -343,7 +356,7 @@ pub(crate) async fn dialog_close_window(appwindow: &RnAppWindow) {
         prefix_box.append(&check);
         if canvas_output_file.is_some() {
             // Indicate that a new existing file will be saved
-            let icon_image = gtk4::Image::from_icon_name("doc-save-symbolic");
+            let icon_image = gtk4::Image::from_icon_name("save-symbolic");
             icon_image.set_tooltip_text(Some(&gettext("The changes will be saved")));
             prefix_box.append(&icon_image);
         } else {
@@ -363,7 +376,7 @@ pub(crate) async fn dialog_close_window(appwindow: &RnAppWindow) {
         rows.push((i, check, save_file));
     }
 
-    let close = match dialog.choose_future(appwindow).await.as_str() {
+    let close = match dialog.choose_future(Some(appwindow)).await.as_str() {
         "discard" => {
             // do nothing and close
             true
@@ -466,29 +479,43 @@ pub(crate) async fn dialog_edit_selected_workspace(appwindow: &RnAppWindow) {
     color_button.set_rgba(&initial_entry.color());
     dir_label.set_label(initial_entry.dir().as_str());
 
-    name_entryrow.connect_changed(clone!(@weak preview_row => move |entry| {
-        let text = entry.text().to_string();
-        preview_row.entry().set_name(text);
-    }));
+    name_entryrow.connect_changed(clone!(
+        #[weak]
+        preview_row,
+        move |entry| {
+            let text = entry.text().to_string();
+            preview_row.entry().set_name(text);
+        }
+    ));
 
     icon_picker.connect_notify_local(
         Some("picked"),
-        clone!(@weak icon_menubutton, @weak preview_row, @weak appwindow => move |iconpicker, _| {
-            if let Some(picked) = iconpicker.picked() {
-                icon_menubutton.set_icon_name(&picked);
-                preview_row.entry().set_icon(picked);
+        clone!(
+            #[weak]
+            icon_menubutton,
+            #[weak]
+            preview_row,
+            move |iconpicker, _| {
+                if let Some(picked) = iconpicker.picked() {
+                    icon_menubutton.set_icon_name(&picked);
+                    preview_row.entry().set_icon(picked);
+                }
             }
-        }),
+        ),
     );
 
-    color_button.connect_rgba_notify(clone!(@weak preview_row => move |button| {
-        let color = button.rgba();
-        preview_row.entry().set_color(color);
-    }));
+    color_button.connect_rgba_notify(clone!(
+        #[weak]
+        preview_row,
+        move |button| {
+            let color = button.rgba();
+            preview_row.entry().set_color(color);
+        }
+    ));
 
     dir_button.connect_clicked(
-        clone!(@weak preview_row, @weak dir_label, @weak name_entryrow, @weak dialog, @weak appwindow => move |_| {
-            glib::spawn_future_local(clone!(@weak preview_row, @weak dir_label, @weak name_entryrow, @weak dialog, @weak appwindow => async move {
+        clone!(#[weak] preview_row, #[weak] dir_label, #[weak] name_entryrow, #[weak] dialog, #[weak] appwindow , move |_| {
+            glib::spawn_future_local(clone!(#[weak] preview_row, #[weak] dir_label, #[weak] name_entryrow, #[weak] dialog, #[weak] appwindow , async move {
                 dialog.set_sensitive(false);
 
                 let filedialog = FileDialog::builder()
@@ -527,12 +554,22 @@ pub(crate) async fn dialog_edit_selected_workspace(appwindow: &RnAppWindow) {
 
     // Listen to responses
 
-    edit_selected_workspace_button_cancel.connect_clicked(clone!(@weak dialog => move |_| {
-        dialog.close();
-    }));
+    edit_selected_workspace_button_cancel.connect_clicked(clone!(
+        #[weak]
+        dialog,
+        move |_| {
+            dialog.close();
+        }
+    ));
 
-    edit_selected_workspace_button_apply.connect_clicked(
-        clone!(@weak preview_row, @weak dialog, @weak appwindow => move |_| {
+    edit_selected_workspace_button_apply.connect_clicked(clone!(
+        #[weak]
+        preview_row,
+        #[weak]
+        dialog,
+        #[weak]
+        appwindow,
+        move |_| {
             dialog.close();
 
             // update the actual selected entry
@@ -546,10 +583,54 @@ pub(crate) async fn dialog_edit_selected_workspace(appwindow: &RnAppWindow) {
                 .sidebar()
                 .workspacebrowser()
                 .refresh_dir_list_selected_workspace();
-        }),
-    );
+        }
+    ));
 
-    dialog.present(appwindow);
+    dialog.present(appwindow.root().as_ref());
+}
+
+pub(crate) async fn dialog_trash_file(appwindow: &RnAppWindow, current_file: &gio::File) {
+    let builder = Builder::from_resource(
+        (String::from(config::APP_IDPATH) + "ui/dialogs/dialogs.ui").as_str(),
+    );
+    let dialog: adw::AlertDialog = builder.object("dialog_trash_file").unwrap();
+
+    match dialog.choose_future(Some(appwindow)).await.as_str() {
+        "trash" => {
+            glib::spawn_future_local(clone!(
+                #[weak]
+                appwindow,
+                #[strong]
+                current_file,
+                async move {
+                    current_file.trash_async(
+                        glib::source::Priority::DEFAULT,
+                        None::<&gio::Cancellable>,
+                        clone!(
+                            #[weak]
+                            appwindow,
+                            #[strong]
+                            current_file,
+                            move |res| {
+                                if let Err(e) = res {
+                                    appwindow
+                                        .overlays()
+                                        .dispatch_toast_error(&gettext("Trashing file failed"));
+                                    error!(
+                                        "Trash filerow file `{current_file:?}` failed , Err: {e:?}"
+                                    );
+                                    return;
+                                }
+                            }
+                        ),
+                    );
+                }
+            ));
+        }
+        _ => {
+            // Cancel
+        }
+    }
 }
 
 const WORKSPACELISTENTRY_ICONS_LIST: &[&str] = &[

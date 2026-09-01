@@ -1,6 +1,6 @@
 // Imports
 use p2d::bounding_volume::Aabb;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 
 /// Matches when a Xml header is present
 const XML_HEADER_REGEX: &str = r"<\?xml[^\?>]*\?>";
@@ -35,11 +35,10 @@ pub fn wrap_svg_root(
     preserve_aspectratio: bool,
 ) -> String {
     let (x, y, width, height) = if let Some(bounds) = bounds {
-        let x = format!("{:.3}", bounds.mins[0]);
-        let y = format!("{:.3}", bounds.mins[1]);
-        let width = format!("{:.3}", bounds.extents()[0]);
-        let height = format!("{:.3}", bounds.extents()[1]);
-
+        let x = format!("{:.3}", bounds.mins.x);
+        let y = format!("{:.3}", bounds.mins.y);
+        let width = format!("{:.3}", bounds.extents().x);
+        let height = format!("{:.3}", bounds.extents().y);
         (x, y, width, height)
     } else {
         (
@@ -53,10 +52,10 @@ pub fn wrap_svg_root(
     let viewbox = if let Some(viewbox) = viewbox {
         format!(
             "{:.3} {:.3} {:.3} {:.3}",
-            viewbox.mins[0],
-            viewbox.mins[1],
-            viewbox.extents()[0],
-            viewbox.extents()[1]
+            viewbox.mins.x,
+            viewbox.mins.y,
+            viewbox.extents().x,
+            viewbox.extents().y
         )
     } else {
         String::from("")
@@ -100,14 +99,14 @@ pub fn new_rng_default_pcg64(seed: Option<u64>) -> rand_pcg::Pcg64 {
     if let Some(seed) = seed {
         rand_pcg::Pcg64::seed_from_u64(seed)
     } else {
-        rand_pcg::Pcg64::from_entropy()
+        rand_pcg::Pcg64::from_rng(&mut rand::rng())
     }
 }
 
 /// Generate a alphanumeric random prefix for Svg Id's to avoid Id collisions.
 pub fn svg_random_id_prefix() -> String {
-    rand::thread_rng()
-        .sample_iter(&rand::distributions::Alphanumeric)
+    rand::rng()
+        .sample_iter(&rand::distr::Alphanumeric)
         .take(8)
         .map(char::from)
         .collect::<String>()
@@ -116,5 +115,5 @@ pub fn svg_random_id_prefix() -> String {
 /// Generate a new seed by generating a random value seeded from the old seed using the Pcg algorithm.
 pub fn seed_advance(seed: u64) -> u64 {
     let mut rng = rand_pcg::Pcg64::seed_from_u64(seed);
-    rng.gen()
+    rng.random()
 }

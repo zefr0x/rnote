@@ -2,11 +2,11 @@
 use super::RnWorkspaceListEntry;
 use crate::RnAppWindow;
 use gtk4::{
-    glib, glib::clone, prelude::*, subclass::prelude::*, CompositeTemplate, CssProvider, Image,
-    Label, Widget,
+    CompositeTemplate, CssProvider, Image, Label, Widget, glib, glib::clone, prelude::*,
+    subclass::prelude::*,
 };
 use once_cell::sync::Lazy;
-use rnote_compose::{color, Color};
+use rnote_compose::{Color, color};
 use rnote_engine::ext::GdkRGBAExt;
 use std::cell::RefCell;
 use unicode_segmentation::UnicodeSegmentation;
@@ -80,7 +80,7 @@ mod imp {
 
                     self.entry.replace(entry);
                     self.connect_entry();
-                    self.update_apearance();
+                    self.update_appearance();
                 }
                 _ => unimplemented!(),
             }
@@ -102,53 +102,61 @@ mod imp {
 
             self.entry.borrow().connect_notify_local(
                 Some("dir"),
-                clone!(@weak obj as workspacerow => move |_, _| {
-                    workspacerow.imp().update_apearance();
-                }),
+                clone!(
+                    #[weak(rename_to=workspacerow)]
+                    obj,
+                    move |_, _| {
+                        workspacerow.imp().update_appearance();
+                    }
+                ),
             );
 
             self.entry.borrow().connect_notify_local(
                 Some("icon"),
-                clone!(@weak obj as workspacerow => move |_, _| {
-                    workspacerow.imp().update_apearance();
-                }),
+                clone!(
+                    #[weak(rename_to=workspacerow)]
+                    obj,
+                    move |_, _| {
+                        workspacerow.imp().update_appearance();
+                    }
+                ),
             );
 
             self.entry.borrow().connect_notify_local(
                 Some("color"),
-                clone!(@weak obj as workspacerow => move |_, _| {
-                    workspacerow.imp().update_apearance();
-                }),
+                clone!(
+                    #[weak(rename_to=workspacerow)]
+                    obj,
+                    move |_, _| {
+                        workspacerow.imp().update_appearance();
+                    }
+                ),
             );
 
             self.entry.borrow().connect_notify_local(
                 Some("name"),
-                clone!(@weak obj as workspacerow => move |_, _| {
-                    workspacerow.imp().update_apearance();
-                }),
+                clone!(
+                    #[weak(rename_to=workspacerow)]
+                    obj,
+                    move |_, _| {
+                        workspacerow.imp().update_appearance();
+                    }
+                ),
             );
         }
 
-        fn update_apearance(&self) {
+        fn update_appearance(&self) {
             let dir = self.entry.borrow().dir();
             let icon = self.entry.borrow().icon();
             let color = self.entry.borrow().color().into_compose_color();
             let name = self.entry.borrow().name();
 
-            let workspacerow_color = format!(
-                "rgba({0}, {1}, {2}, {3:.3})",
-                (color.r * 255.0) as i32,
-                (color.g * 255.0) as i32,
-                (color.b * 255.0) as i32,
-                (color.a * 1000.0).round() / 1000.0,
-            );
-
             let workspacerow_fg_color = if color == Color::TRANSPARENT {
-                String::from("@window_fg_color")
+                "@window_fg_color"
             } else if color.luma() < color::FG_LUMINANCE_THRESHOLD {
-                String::from("@light_1")
+                "@light_1"
             } else {
-                String::from("@dark_5")
+                "@dark_5"
             };
 
             let css = CssProvider::new();
@@ -161,7 +169,14 @@ mod imp {
             self.folder_image.set_icon_name(Some(&icon));
 
             let custom_css = format!(
-                "@define-color workspacerow_color {workspacerow_color};@define-color workspacerow_fg_color {workspacerow_fg_color};",
+                "@define-color workspacerow_color {};@define-color workspacerow_fg_color {workspacerow_fg_color};",
+                format_args!(
+                    "rgba({0}, {1}, {2}, {3:.3})",
+                    (color.r * 255.0) as i32,
+                    (color.g * 255.0) as i32,
+                    (color.b * 255.0) as i32,
+                    (color.a * 1000.0).round() / 1000.0,
+                )
             );
 
             css.load_from_string(&custom_css);
@@ -180,7 +195,8 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnWorkspaceRow(ObjectSubclass<imp::RnWorkspaceRow>)
-        @extends gtk4::Widget;
+        @extends Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 
 impl Default for RnWorkspaceRow {

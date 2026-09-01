@@ -40,6 +40,7 @@ Written in Rust and GTK4.
 - Save and load the documents in the native `.rnote` file format
 - Tabs to work on multiple documents at the same time
 - Autosave, printing
+- CLI for automation
 
 **Disclaimer**
 
@@ -61,11 +62,11 @@ Download the official flatpak on Flathub [here](https://flathub.org/apps/details
 
 ### MacOS
 
-Thanks to @dehesselle the app is available on MacOS as an app bundle.  
+Thanks to [dehesselle](https://gitlab.com/dehesselle) the app is available on MacOS as an app bundle.  
 Check out the [repository](https://gitlab.com/dehesselle/rnote_macos), the latest release can be downloaded [here](https://gitlab.com/dehesselle/rnote_macos/-/releases/permalink/latest).
 
 <div align="start">
-<a href='https://gitlab.com/dehesselle/rnote_macos/-/releases/permalink/latest'><img height="150" alt='Download MacOS app bundle' src='https://raw.githubusercontent.com/flxzt/rnote/main/misc/assets/rnote-macos-app-bundle-badge.png'/></a>
+<a href='https://gitlab.com/dehesselle/rnote_macos/-/releases/permalink/latest'><img width="150" alt='Download MacOS app bundle' src='https://raw.githubusercontent.com/flxzt/rnote/main/misc/assets/rnote-macos-app-bundle-badge.png'/></a>
 </div><br>
 
 ### Windows
@@ -107,6 +108,16 @@ $ flatpak mask --remove com.github.flxzt.rnote
 
 To update to the latest version again, unpin and run `flatpak update`.
 
+## CLI
+
+In addition to the UI, a CLI tool is available, providing basic handling of .rnote files for automation.
+It is included in the flatpak.
+To execute it, run:
+
+```bash
+flatpak run --command=rnote-cli com.github.flxzt.rnote help
+```
+
 ## Screenshots
 
 ![overview](./crates/rnote-ui/data/screenshots/overview.png)  
@@ -119,6 +130,11 @@ To update to the latest version again, unpin and run `flatpak update`.
 
 ## Pitfalls & Known Issues
 
+* The app does not work properly on X11 -  
+    X11 is unsupported: stylus and touch input support is known to be sometimes spotty, and upstream support (GTK4 UI
+    toolkit and desktop environments) will decrease over time (from lower maintenance, depreciation to removal)
+    so successfully fixing X11-related issues for users isn't feasible anymore.
+
 * Drag & Drop not working -  
     Make sure Rnote has permissions to the locations you are dragging files from. Can be granted in Flatseal (a Flatpak permissions manager)
 
@@ -126,14 +142,14 @@ To update to the latest version again, unpin and run `flatpak update`.
     When the directory displayed in the header title is something like `/run/user/1000/../`, rnote does not have permissions to access the directory. Again, granting them in Flatseal fixes this issue.
 
 * Stylus buttons move canvas / are not functional -  
-    Make sure that the `xf86-input-wacom`, drivers on X11 and `libinput` on Wayland and `libwacom` are installed and loaded.
+    Make sure that `libinput` and `libwacom` are installed and loaded.
 
 * While hovering with the stylus, other input events are blocked in some regions of the screen -  
     Supposed to be palm rejection, but might be undesirable. If there is a left- / righthanded system tablet setting, make sure it is set correctly. Rnote can't disable this unfortunately. ( discussed in issue [#329](https://github.com/flxzt/rnote/issues/329) )
 
 * One of the stylus buttons shortcut mapping does not work as intended -  
 On some devices one stylus button is mapped to a dedicated "Eraser" mode (which is the back-side on other styli). The buttons in the shortcuts settings could then be inconsistent ( the secondary / upper button is actually the primary / lower button , or reverse ). To change the tool that is mapped to this "Eraser" mode, do the following:  
-    * Hover over the canvas, and press and hold the button that that is suspected to be mapped to the "Eraser" mode
+    * Hover over the canvas, and press and hold the button that is suspected to be mapped to the "Eraser" mode
     * Switch to the desired pen style while keeping the button pressed
     * When releasing the pressed button, it should switch back to the previous pen style
     * The pen style in the "Eraser" mode should now be remembered
@@ -144,11 +160,8 @@ On some devices one stylus button is mapped to a dedicated "Eraser" mode (which 
 <img src="https://hosted.weblate.org/widgets/rnote/-/repo/multi-auto.svg" alt="Translation status" />
 </a><br><br>
 
-A great way to contribute to the project without writing code is adding a new or start maintaining an existing translation language. The translations files are located in `crates/rnote-ui/po/`.
-
- Creating translations for new languages or updating existing ones can be done in multiple ways:
-- take the `rnote.pot` file and generate a new `.po` translation file from it, for example with "Poedit". Add the new translation language to `LINGUAS` and submit a PR with the changed files.
-- use [weblate](https://hosted.weblate.org/projects/rnote/repo/) for an easy way to translate in the browser without having to deal with git.
+If you want to start contributing by translating, take a look into the [translations section](./CONTRIBUTING.md#Translations)
+of the CONTRIBUTING document.
 
 ## Fonts
 
@@ -218,6 +231,7 @@ If you have drawn something cool in Rnote and want to share it, submit a PR to a
         <img alt="Love" src="https://raw.githubusercontent.com/flxzt/rnote/main/misc/drawings/love.png" height="400">
         <img alt="Suits" src="https://raw.githubusercontent.com/flxzt/rnote/main/misc/drawings/suits.png" height="400">
         <img alt="Nature's cat" src="https://raw.githubusercontent.com/flxzt/rnote/main/misc/drawings/natureza_gato.png" height="400">
+        <img alt="Donald Duck" src="./misc/drawings/donald.png" height="400">
 </div><br>
 
 ## Building

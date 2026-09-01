@@ -7,13 +7,23 @@ use palette::convert::IntoColor;
 use path_absolutize::Absolutize;
 use rnote_compose::Color;
 use std::cell::Ref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::slice::Iter;
 
 /// The suffix delimiter when duplicating/renaming already existing files
 pub(crate) const FILE_DUP_SUFFIX_DELIM: &str = " - ";
 /// The suffix delimiter when duplicating/renaming already existing files for usage in a regular expression
 pub(crate) const FILE_DUP_SUFFIX_DELIM_REGEX: &str = r"\s-\s";
+
+/// An asynchronous adaptation of the [`rnote_engine::utils::atomic_save_to_file`] function.
+pub(crate) async fn atomic_save_to_file_future<Q>(filepath: Q, bytes: Vec<u8>) -> anyhow::Result<()>
+where
+    Q: AsRef<std::path::Path>,
+{
+    let filepath = filepath.as_ref().to_path_buf();
+
+    blocking::unblock(move || rnote_engine::utils::atomic_save_to_file(filepath, bytes)).await
+}
 
 /// Create a new file or replace if it already exists, asynchronously.
 pub(crate) async fn create_replace_file_future(
@@ -200,7 +210,9 @@ pub(crate) fn color_to_hsv_label_string(color: Color) -> String {
         _ if min_saturated => "".to_string(),
         v if v < 0.25 => pgettext("part of string representation of a color", "greyish"),
         v if (0.25..0.50).contains(&v) => "".to_string(),
-        v if (0.50..0.75).contains(&v) => "strong".to_string(),
+        v if (0.50..0.75).contains(&v) => {
+            pgettext("part of string representation of a color", "strong")
+        }
         v if v >= 0.75 => pgettext("part of string representation of a color", "vivid"),
         _ => unreachable!(),
     };
@@ -240,4 +252,16 @@ pub(crate) fn color_to_hsv_label_string(color: Color) -> String {
     } else {
         format!("{alpha_str} {saturation_str} {value_str} {hue_str}")
     }
+}
+
+pub(crate) fn path_walk_up_until_exists(path: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
+    let mut path = path.as_ref().absolutize()?.to_path_buf();
+    while !path.exists() {
+        path = path
+            .parent()
+            .filter(|p| p.parent().is_some())
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| anyhow::anyhow!("Path {} has no parent", path.display()))?;
+    }
+    Ok(path)
 }

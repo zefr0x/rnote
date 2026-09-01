@@ -1,7 +1,7 @@
 // Imports
 use crate::appwindow::RnAppWindow;
 use adw::{prelude::*, subclass::prelude::*};
-use gtk4::{gio, glib, CompositeTemplate, MenuButton, PopoverMenu, ToggleButton, Widget};
+use gtk4::{CompositeTemplate, MenuButton, PopoverMenu, ToggleButton, Widget, gio, glib};
 
 mod imp {
     use super::*;
@@ -25,7 +25,7 @@ mod imp {
     impl ObjectSubclass for RnAppMenu {
         const NAME: &'static str = "RnAppMenu";
         type Type = super::RnAppMenu;
-        type ParentType = gtk4::Widget;
+        type ParentType = Widget;
 
         fn class_init(klass: &mut Self::Class) {
             klass.bind_template();
@@ -63,7 +63,8 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnAppMenu(ObjectSubclass<imp::RnAppMenu>)
-    @extends Widget;
+        @extends Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 
 impl Default for RnAppMenu {

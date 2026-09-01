@@ -2,53 +2,70 @@
 mod penevents;
 
 // Imports
-use super::pensconfig::TypewriterConfig;
 use super::PenBehaviour;
 use super::PenStyle;
+use super::pensconfig::TypewriterConfig;
 use crate::engine::{EngineTask, EngineView, EngineViewMut};
 use crate::store::StrokeKey;
 use crate::strokes::textstroke::{RangedTextAttribute, TextAttribute, TextStyle};
 use crate::strokes::{Stroke, TextStroke};
-use crate::{AudioPlayer, Camera, DrawableOnDoc, WidgetFlags};
+use crate::{Camera, DrawableOnDoc, WidgetFlags};
 use futures::channel::oneshot;
 use p2d::bounding_volume::{Aabb, BoundingVolume};
+use p2d::glamx::DAffine2;
+use p2d::math::Vector2;
 use piet::RenderContext;
+use rnote_compose::EventResult;
+use rnote_compose::color;
 use rnote_compose::ext::{AabbExt, Vector2Ext};
-use rnote_compose::penevent::{KeyboardKey, PenEvent, PenProgress, PenState};
+use rnote_compose::penevent::{PenEvent, PenProgress, PenState};
 use rnote_compose::shapes::Shapeable;
 use rnote_compose::style::indicators;
-use rnote_compose::EventResult;
-use rnote_compose::{color, Transform};
 use std::ops::Range;
 use std::time::{Duration, Instant};
 use tracing::error;
 use unicode_segmentation::GraphemeCursor;
 
 #[derive(Debug, Clone)]
+pub(super) enum SelectionMode {
+    /// Select individual characters.
+    Caret,
+    /// Select whole words.
+    ///
+    /// The values represent the start and end of the initially selected word.
+    Word(usize, usize),
+    /// Select whole lines.
+    ///
+    /// The values represent the start and end of the initially selected line.
+    Line(usize, usize),
+}
+
+#[derive(Debug, Clone)]
 pub(super) enum ModifyState {
-    Up,
-    Hover(na::Vector2<f64>),
+    Idle,
     Selecting {
         selection_cursor: GraphemeCursor,
+        mode: SelectionMode,
         /// Whether selecting is finished.
         ///
         /// If true, the state will get reset on the next click.
         finished: bool,
     },
     Translating {
-        current_pos: na::Vector2<f64>,
+        current_pos: Vector2,
     },
     AdjustTextWidth {
         start_text_width: f64,
-        start_pos: na::Vector2<f64>,
-        current_pos: na::Vector2<f64>,
+        start_pos: Vector2,
+        current_pos: Vector2,
     },
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub(super) enum TypewriterState {
     Idle,
-    Start(na::Vector2<f64>),
+    Start(Vector2),
     Modifying {
         modify_state: ModifyState,
         stroke_key: StrokeKey,
@@ -60,6 +77,7 @@ pub(super) enum TypewriterState {
 #[derive(Debug, Clone)]
 pub struct Typewriter {
     state: TypewriterState,
+    pos: Option<Vector2>,
     blink_task_handle: Option<crate::tasks::PeriodicTaskHandle>,
     cursor_visible: bool,
 }
@@ -68,6 +86,7 @@ impl Default for Typewriter {
     fn default() -> Self {
         Self {
             state: TypewriterState::Idle,
+            pos: None,
             blink_task_handle: None,
             cursor_visible: true,
         }
@@ -81,23 +100,27 @@ impl DrawableOnDoc for Typewriter {
         match &self.state {
             TypewriterState::Idle => None,
             TypewriterState::Start(pos) => Some(Aabb::new(
-                (*pos).into(),
-                (pos + na::vector![
+                *pos,
+                pos + Vector2::new(
                     Self::STATE_START_TEXT_WIDTH,
                     engine_view
+                        .config
                         .pens_config
                         .typewriter_config
                         .text_style
-                        .font_size
-                ])
-                .into(),
+                        .font_size,
+                ),
             )),
             TypewriterState::Modifying { stroke_key, .. } => {
                 if let Some(Stroke::TextStroke(textstroke)) =
                     engine_view.store.get_stroke_ref(*stroke_key)
                 {
                     let text_rect = Self::text_rect_bounds(
-                        engine_view.pens_config.typewriter_config.text_width(),
+                        engine_view
+                            .config
+                            .pens_config
+                            .typewriter_config
+                            .text_width(),
                         textstroke,
                     );
                     let typewriter_bounds = text_rect.extend_by(
@@ -143,6 +166,7 @@ impl DrawableOnDoc for Typewriter {
                         let cursor_text = String::from('|');
                         let cursor_text_len = cursor_text.len();
                         engine_view
+                            .config
                             .pens_config
                             .typewriter_config
                             .text_style
@@ -150,7 +174,7 @@ impl DrawableOnDoc for Typewriter {
                                 cx,
                                 cursor_text,
                                 &GraphemeCursor::new(0, cursor_text_len, true),
-                                &Transform::new_w_isometry(na::Isometry2::new(*pos, 0.0)),
+                                &DAffine2::from_translation(*pos),
                                 engine_view.camera,
                             )?;
                     }
@@ -165,7 +189,11 @@ impl DrawableOnDoc for Typewriter {
                 if let Some(Stroke::TextStroke(textstroke)) =
                     engine_view.store.get_stroke_ref(*stroke_key)
                 {
-                    let text_width = engine_view.pens_config.typewriter_config.text_width();
+                    let text_width = engine_view
+                        .config
+                        .pens_config
+                        .typewriter_config
+                        .text_width();
                     let text_bounds = Self::text_rect_bounds(text_width, textstroke);
 
                     // Draw text outline
@@ -181,7 +209,7 @@ impl DrawableOnDoc for Typewriter {
                             textstroke.text.clone(),
                             cursor,
                             selection_cursor,
-                            &textstroke.transform,
+                            &textstroke.affine,
                             engine_view.camera,
                         );
                     }
@@ -192,38 +220,44 @@ impl DrawableOnDoc for Typewriter {
                             cx,
                             textstroke.text.clone(),
                             cursor,
-                            &textstroke.transform,
+                            &textstroke.affine,
                             engine_view.camera,
                         )?;
                     }
 
                     // Draw the text width adjust node
                     let adjust_text_width_node_bounds = Self::adjust_text_width_node_bounds(
-                        text_bounds.mins.coords,
+                        text_bounds.mins,
                         text_width,
                         engine_view.camera,
                     );
                     let adjust_text_width_node_state = match modify_state {
                         ModifyState::AdjustTextWidth { .. } => PenState::Down,
-                        ModifyState::Hover(pos) => {
-                            if adjust_text_width_node_bounds.contains_local_point(&(*pos).into()) {
-                                PenState::Proximity
+                        ModifyState::Idle | ModifyState::Selecting { .. } => {
+                            if let Some(pos) = self.pos {
+                                if adjust_text_width_node_bounds.contains_local_point(pos) {
+                                    PenState::Proximity
+                                } else {
+                                    PenState::Up
+                                }
                             } else {
                                 PenState::Up
                             }
                         }
                         _ => PenState::Up,
                     };
+
                     indicators::draw_triangular_node(
                         cx,
                         adjust_text_width_node_state,
                         Self::adjust_text_width_node_center(
-                            text_bounds.mins.coords,
+                            text_bounds.mins,
                             text_width,
                             engine_view.camera,
                         ),
                         Self::ADJUST_TEXT_WIDTH_NODE_SIZE / total_zoom,
                         total_zoom,
+                        piet::Color::from(engine_view.document.config.background.color),
                     );
 
                     // Draw the translate Node
@@ -232,20 +266,26 @@ impl DrawableOnDoc for Typewriter {
                             Self::translate_node_bounds(typewriter_bounds, engine_view.camera);
                         let translate_node_state = match modify_state {
                             ModifyState::Translating { .. } => PenState::Down,
-                            ModifyState::Hover(pos) => {
-                                if translate_node_bounds.contains_local_point(&(*pos).into()) {
-                                    PenState::Proximity
+                            ModifyState::Idle | ModifyState::Selecting { .. } => {
+                                if let Some(pos) = self.pos {
+                                    if translate_node_bounds.contains_local_point(pos) {
+                                        PenState::Proximity
+                                    } else {
+                                        PenState::Up
+                                    }
                                 } else {
                                     PenState::Up
                                 }
                             }
                             _ => PenState::Up,
                         };
+
                         indicators::draw_rectangular_node(
                             cx,
                             translate_node_state,
                             translate_node_bounds,
                             total_zoom,
+                            piet::Color::from(engine_view.document.config.background.color),
                         );
                     }
                 }
@@ -297,46 +337,55 @@ impl PenBehaviour for Typewriter {
                     if let Some(Stroke::TextStroke(textstroke)) =
                         engine_view.store.get_stroke_ref(*stroke_key)
                     {
-                        engine_view.pens_config.typewriter_config.text_style =
+                        engine_view.config.pens_config.typewriter_config.text_style =
                             textstroke.text_style.clone();
                         engine_view
+                            .config
                             .pens_config
                             .typewriter_config
                             .text_style
                             .ranged_text_attributes
                             .clear();
-                        engine_view.pens_config.typewriter_config.set_text_width(
-                            textstroke
-                                .text_style
-                                .max_width()
-                                .unwrap_or(TypewriterConfig::TEXT_WIDTH_DEFAULT),
-                        );
+                        engine_view
+                            .config
+                            .pens_config
+                            .typewriter_config
+                            .set_text_width(
+                                textstroke
+                                    .text_style
+                                    .max_width()
+                                    .unwrap_or(TypewriterConfig::TEXT_WIDTH_DEFAULT),
+                            );
                         update_cursors_for_textstroke(textstroke, cursor, Some(selection_cursor));
 
                         widget_flags.refresh_ui = true;
                     }
                 }
-                ModifyState::Up
-                | ModifyState::Hover(_)
+                ModifyState::Idle
                 | ModifyState::Translating { .. }
                 | ModifyState::AdjustTextWidth { .. } => {
                     if let Some(Stroke::TextStroke(textstroke)) =
                         engine_view.store.get_stroke_ref(*stroke_key)
                     {
-                        engine_view.pens_config.typewriter_config.text_style =
+                        engine_view.config.pens_config.typewriter_config.text_style =
                             textstroke.text_style.clone();
                         engine_view
+                            .config
                             .pens_config
                             .typewriter_config
                             .text_style
                             .ranged_text_attributes
                             .clear();
-                        engine_view.pens_config.typewriter_config.set_text_width(
-                            textstroke
-                                .text_style
-                                .max_width()
-                                .unwrap_or(TypewriterConfig::TEXT_WIDTH_DEFAULT),
-                        );
+                        engine_view
+                            .config
+                            .pens_config
+                            .typewriter_config
+                            .set_text_width(
+                                textstroke
+                                    .text_style
+                                    .max_width()
+                                    .unwrap_or(TypewriterConfig::TEXT_WIDTH_DEFAULT),
+                            );
                         update_cursors_for_textstroke(textstroke, cursor, None);
 
                         widget_flags.refresh_ui = true;
@@ -484,7 +533,7 @@ impl PenBehaviour for Typewriter {
 
                             // Back to modifying state
                             self.state = TypewriterState::Modifying {
-                                modify_state: ModifyState::Up,
+                                modify_state: ModifyState::Idle,
                                 stroke_key: *stroke_key,
                                 cursor: cursor.clone(),
                                 pen_down: false,
@@ -536,13 +585,13 @@ fn update_cursors_for_textstroke(
 
 impl Typewriter {
     // The size of the translate node, located in the upper left corner.
-    const TRANSLATE_NODE_SIZE: na::Vector2<f64> = na::vector![18.0, 18.0];
+    const TRANSLATE_NODE_SIZE: Vector2 = Vector2::splat(18.0);
     /// The threshold where above it a transformation is applied. In surface coordinates.
     const TRANSLATE_OFFSET_THRESHOLD: f64 = 1.414;
     /// The threshold in x-axis direction where above it adjustments to the text width are applied. In surface coordinates.
     const ADJ_TEXT_WIDTH_THRESHOLD: f64 = 1.0;
     /// The size of the translate node, located in the upper right corner.
-    const ADJUST_TEXT_WIDTH_NODE_SIZE: na::Vector2<f64> = na::vector![18.0, 18.0];
+    const ADJUST_TEXT_WIDTH_NODE_SIZE: Vector2 = Vector2::splat(18.0);
     /// The text width when the typewriter is in `Start` state.
     const STATE_START_TEXT_WIDTH: f64 = 10.0;
     /// The outline stroke width when drawing a text box outline
@@ -579,8 +628,8 @@ impl Typewriter {
 
     /// The bounds of the text rect enclosing the textstroke.
     fn text_rect_bounds(text_width: f64, textstroke: &TextStroke) -> Aabb {
-        let origin = textstroke.transform.translation_part();
-        Aabb::new(origin.into(), na::point![origin[0] + text_width, origin[1]])
+        let origin = textstroke.affine.translation;
+        Aabb::new(origin, Vector2::new(origin[0] + text_width, origin[1]))
             .merged(&textstroke.bounds())
     }
 
@@ -588,36 +637,33 @@ impl Typewriter {
     fn translate_node_bounds(typewriter_bounds: Aabb, camera: &Camera) -> Aabb {
         let total_zoom = camera.total_zoom();
         Aabb::from_half_extents(
-            (typewriter_bounds.mins.coords + Self::TRANSLATE_NODE_SIZE * 0.5 / total_zoom).into(),
+            typewriter_bounds.mins + Self::TRANSLATE_NODE_SIZE * 0.5 / total_zoom,
             Self::TRANSLATE_NODE_SIZE * 0.5 / total_zoom,
         )
     }
 
     /// The center of the adjust text width node.
     fn adjust_text_width_node_center(
-        text_rect_origin: na::Vector2<f64>,
+        text_rect_origin: Vector2,
         text_width: f64,
         camera: &Camera,
-    ) -> na::Vector2<f64> {
+    ) -> Vector2 {
         let total_zoom = camera.total_zoom();
-        na::vector![
+        Vector2::new(
             text_rect_origin[0] + text_width,
-            text_rect_origin[1] - Self::ADJUST_TEXT_WIDTH_NODE_SIZE[1] * 0.5 / total_zoom
-        ]
+            text_rect_origin[1] - Self::ADJUST_TEXT_WIDTH_NODE_SIZE[1] * 0.5 / total_zoom,
+        )
     }
 
     /// The bounds of the adjust text width node.
     fn adjust_text_width_node_bounds(
-        text_rect_origin: na::Vector2<f64>,
+        text_rect_origin: Vector2,
         text_width: f64,
         camera: &Camera,
     ) -> Aabb {
         let total_zoom = camera.total_zoom();
         let center = Self::adjust_text_width_node_center(text_rect_origin, text_width, camera);
-        Aabb::from_half_extents(
-            center.into(),
-            Self::ADJUST_TEXT_WIDTH_NODE_SIZE * 0.5 / total_zoom,
-        )
+        Aabb::from_half_extents(center, Self::ADJUST_TEXT_WIDTH_NODE_SIZE * 0.5 / total_zoom)
     }
 
     /// Insert text either at the current cursor position or, if the state is idle, in a new textstroke.
@@ -626,15 +672,23 @@ impl Typewriter {
     pub(crate) fn insert_text(
         &mut self,
         text: String,
-        preferred_pos: Option<na::Vector2<f64>>,
+        preferred_pos: Option<Vector2>,
         engine_view: &mut EngineViewMut,
     ) -> WidgetFlags {
-        let pos = preferred_pos.unwrap_or_else(|| {
-            engine_view.camera.viewport().mins.coords + Stroke::IMPORT_OFFSET_DEFAULT
-        });
+        let pos = preferred_pos
+            .unwrap_or_else(|| engine_view.camera.viewport().mins + Stroke::IMPORT_OFFSET_DEFAULT);
         let mut widget_flags = WidgetFlags::default();
-        let text_width = engine_view.pens_config.typewriter_config.text_width();
-        let mut text_style = engine_view.pens_config.typewriter_config.text_style.clone();
+        let text_width = engine_view
+            .config
+            .pens_config
+            .typewriter_config
+            .text_width();
+        let mut text_style = engine_view
+            .config
+            .pens_config
+            .typewriter_config
+            .text_style
+            .clone();
 
         match &mut self.state {
             TypewriterState::Idle => {
@@ -654,7 +708,7 @@ impl Typewriter {
                 );
 
                 self.state = TypewriterState::Modifying {
-                    modify_state: ModifyState::Up,
+                    modify_state: ModifyState::Idle,
                     stroke_key,
                     cursor,
                     pen_down: false,
@@ -681,7 +735,7 @@ impl Typewriter {
                 );
 
                 self.state = TypewriterState::Modifying {
-                    modify_state: ModifyState::Up,
+                    modify_state: ModifyState::Idle,
                     stroke_key,
                     cursor,
                     pen_down: false,
@@ -719,7 +773,7 @@ impl Typewriter {
                             .resize_autoexpand(engine_view.store, engine_view.camera);
 
                         self.state = TypewriterState::Modifying {
-                            modify_state: ModifyState::Up,
+                            modify_state: ModifyState::Idle,
                             stroke_key: *stroke_key,
                             cursor: cursor.clone(),
                             pen_down: false,
@@ -768,22 +822,21 @@ impl Typewriter {
     {
         let mut widget_flags = WidgetFlags::default();
 
-        if let TypewriterState::Modifying { stroke_key, .. } = &mut self.state {
-            if let Some(Stroke::TextStroke(textstroke)) =
+        if let TypewriterState::Modifying { stroke_key, .. } = &mut self.state
+            && let Some(Stroke::TextStroke(textstroke)) =
                 engine_view.store.get_stroke_mut(*stroke_key)
-            {
-                modify_func(&mut textstroke.text_style);
-                engine_view.store.update_geometry_for_stroke(*stroke_key);
-                engine_view.store.regenerate_rendering_for_stroke(
-                    *stroke_key,
-                    engine_view.camera.viewport(),
-                    engine_view.camera.image_scale(),
-                );
+        {
+            modify_func(&mut textstroke.text_style);
+            engine_view.store.update_geometry_for_stroke(*stroke_key);
+            engine_view.store.regenerate_rendering_for_stroke(
+                *stroke_key,
+                engine_view.camera.viewport(),
+                engine_view.camera.image_scale(),
+            );
 
-                widget_flags |= engine_view.store.record(Instant::now());
-                widget_flags.redraw = true;
-                widget_flags.store_modified = true;
-            }
+            widget_flags |= engine_view.store.record(Instant::now());
+            widget_flags.redraw = true;
+            widget_flags.store_modified = true;
         }
 
         widget_flags
@@ -796,22 +849,21 @@ impl Typewriter {
     ) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
 
-        if let Some((selection_range, stroke_key)) = self.selection_range() {
-            if let Some(Stroke::TextStroke(textstroke)) =
+        if let Some((selection_range, stroke_key)) = self.selection_range()
+            && let Some(Stroke::TextStroke(textstroke)) =
                 engine_view.store.get_stroke_mut(stroke_key)
-            {
-                textstroke.toggle_attrs_for_range(selection_range.clone(), text_attribute.clone());
-                engine_view.store.update_geometry_for_stroke(stroke_key);
-                engine_view.store.regenerate_rendering_for_stroke(
-                    stroke_key,
-                    engine_view.camera.viewport(),
-                    engine_view.camera.image_scale(),
-                );
+        {
+            textstroke.toggle_attrs_for_range(selection_range.clone(), text_attribute.clone());
+            engine_view.store.update_geometry_for_stroke(stroke_key);
+            engine_view.store.regenerate_rendering_for_stroke(
+                stroke_key,
+                engine_view.camera.viewport(),
+                engine_view.camera.image_scale(),
+            );
 
-                widget_flags |= engine_view.store.record(Instant::now());
-                widget_flags.redraw = true;
-                widget_flags.store_modified = true;
-            }
+            widget_flags |= engine_view.store.record(Instant::now());
+            widget_flags.redraw = true;
+            widget_flags.store_modified = true;
         }
 
         widget_flags
@@ -823,22 +875,21 @@ impl Typewriter {
     ) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
 
-        if let Some((selection_range, stroke_key)) = self.selection_range() {
-            if let Some(Stroke::TextStroke(textstroke)) =
+        if let Some((selection_range, stroke_key)) = self.selection_range()
+            && let Some(Stroke::TextStroke(textstroke)) =
                 engine_view.store.get_stroke_mut(stroke_key)
-            {
-                textstroke.remove_attrs_for_range(selection_range);
-                engine_view.store.update_geometry_for_stroke(stroke_key);
-                engine_view.store.regenerate_rendering_for_stroke(
-                    stroke_key,
-                    engine_view.camera.viewport(),
-                    engine_view.camera.image_scale(),
-                );
+        {
+            textstroke.remove_attrs_for_range(selection_range);
+            engine_view.store.update_geometry_for_stroke(stroke_key);
+            engine_view.store.regenerate_rendering_for_stroke(
+                stroke_key,
+                engine_view.camera.viewport(),
+                engine_view.camera.image_scale(),
+            );
 
-                widget_flags |= engine_view.store.record(Instant::now());
-                widget_flags.redraw = true;
-                widget_flags.store_modified = true;
-            }
+            widget_flags |= engine_view.store.record(Instant::now());
+            widget_flags.redraw = true;
+            widget_flags.store_modified = true;
         }
 
         widget_flags
@@ -851,28 +902,27 @@ impl Typewriter {
     ) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
 
-        if let Some((selection_range, stroke_key)) = self.selection_range() {
-            if let Some(Stroke::TextStroke(textstroke)) =
+        if let Some((selection_range, stroke_key)) = self.selection_range()
+            && let Some(Stroke::TextStroke(textstroke)) =
                 engine_view.store.get_stroke_mut(stroke_key)
-            {
-                textstroke
-                    .text_style
-                    .ranged_text_attributes
-                    .push(RangedTextAttribute {
-                        attribute: text_attribute,
-                        range: selection_range,
-                    });
-                engine_view.store.update_geometry_for_stroke(stroke_key);
-                engine_view.store.regenerate_rendering_for_stroke(
-                    stroke_key,
-                    engine_view.camera.viewport(),
-                    engine_view.camera.image_scale(),
-                );
+        {
+            textstroke
+                .text_style
+                .ranged_text_attributes
+                .push(RangedTextAttribute {
+                    attribute: text_attribute,
+                    range: selection_range,
+                });
+            engine_view.store.update_geometry_for_stroke(stroke_key);
+            engine_view.store.regenerate_rendering_for_stroke(
+                stroke_key,
+                engine_view.camera.viewport(),
+                engine_view.camera.image_scale(),
+            );
 
-                widget_flags |= engine_view.store.record(Instant::now());
-                widget_flags.redraw = true;
-                widget_flags.store_modified = true;
-            }
+            widget_flags |= engine_view.store.record(Instant::now());
+            widget_flags.redraw = true;
+            widget_flags.store_modified = true;
         }
 
         widget_flags
@@ -885,22 +935,21 @@ impl Typewriter {
     ) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
 
-        if let Some((selection_range, stroke_key)) = self.selection_range() {
-            if let Some(Stroke::TextStroke(textstroke)) =
+        if let Some((selection_range, stroke_key)) = self.selection_range()
+            && let Some(Stroke::TextStroke(textstroke)) =
                 engine_view.store.get_stroke_mut(stroke_key)
-            {
-                textstroke.replace_attr_for_range(selection_range, text_attribute);
-                engine_view.store.update_geometry_for_stroke(stroke_key);
-                engine_view.store.regenerate_rendering_for_stroke(
-                    stroke_key,
-                    engine_view.camera.viewport(),
-                    engine_view.camera.image_scale(),
-                );
+        {
+            textstroke.replace_attr_for_range(selection_range, text_attribute);
+            engine_view.store.update_geometry_for_stroke(stroke_key);
+            engine_view.store.regenerate_rendering_for_stroke(
+                stroke_key,
+                engine_view.camera.viewport(),
+                engine_view.camera.image_scale(),
+            );
 
-                widget_flags |= engine_view.store.record(Instant::now());
-                widget_flags.redraw = true;
-                widget_flags.store_modified = true;
-            }
+            widget_flags |= engine_view.store.record(Instant::now());
+            widget_flags.redraw = true;
+            widget_flags.store_modified = true;
         }
 
         widget_flags
@@ -908,16 +957,20 @@ impl Typewriter {
 
     /// Resets the blink
     fn reset_blink(&mut self) {
-        if let Some(handle) = &mut self.blink_task_handle {
-            if let Err(e) = handle.skip() {
-                error!("Skipping blink task failed, Err: {e:?}");
-            }
+        if let Some(handle) = &mut self.blink_task_handle
+            && let Err(e) = handle.skip()
+        {
+            error!("Skipping blink task failed, Err: {e:?}");
         }
         self.cursor_visible = true;
     }
 }
 
-fn play_sound(keyboard_key: Option<KeyboardKey>, audioplayer: &mut Option<AudioPlayer>) {
+#[cfg(feature = "ui")]
+fn play_sound(
+    keyboard_key: Option<rnote_compose::penevent::KeyboardKey>,
+    audioplayer: &mut Option<crate::AudioPlayer>,
+) {
     if let Some(audioplayer) = audioplayer {
         audioplayer.play_typewriter_key_sound(keyboard_key);
     }

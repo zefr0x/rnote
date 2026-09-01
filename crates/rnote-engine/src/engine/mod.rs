@@ -1,4 +1,6 @@
 // Modules
+pub mod animation;
+pub mod config;
 pub mod export;
 pub mod import;
 pub mod rendering;
@@ -7,32 +9,38 @@ pub mod strokecontent;
 pub mod visual_debug;
 
 // Re-exports
+pub use animation::Animation;
+pub use config::EngineConfig;
+pub use config::EngineConfigShared;
 pub use export::ExportPrefs;
-use futures::channel::mpsc::UnboundedReceiver;
-use futures::StreamExt;
 pub use import::ImportPrefs;
 pub use snapshot::EngineSnapshot;
 pub use strokecontent::StrokeContent;
 
 // Imports
+use crate::Image;
 use crate::document::Layout;
+use crate::pens::PenMode;
 use crate::pens::{Pen, PenStyle};
-use crate::pens::{PenMode, PensConfig};
-use crate::store::render_comp::{self, RenderCompState};
 use crate::store::StrokeKey;
+use crate::store::render_comp::{self, RenderCompState};
 use crate::strokes::content::GeneratedContentImages;
 use crate::strokes::textstroke::{TextAttribute, TextStyle};
-use crate::{render, AudioPlayer, CloneConfig, SelectionCollision, WidgetFlags};
 use crate::{Camera, Document, PenHolder, StrokeStore};
+use crate::{SelectionCollision, WidgetFlags};
+use futures::StreamExt;
+use futures::channel::mpsc::UnboundedReceiver;
 use futures::channel::{mpsc, oneshot};
 use p2d::bounding_volume::{Aabb, BoundingVolume};
+use p2d::math::Vector2;
 use rnote_compose::eventresult::EventPropagation;
 use rnote_compose::ext::AabbExt;
 use rnote_compose::penevent::{PenEvent, ShortcutKey};
 use rnote_compose::{Color, SplitOrder};
 use serde::{Deserialize, Serialize};
+use snapshot::Snapshotable;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 use tracing::error;
 
@@ -40,34 +48,74 @@ use tracing::error;
 #[derive(Debug)]
 pub struct EngineView<'a> {
     pub tasks_tx: EngineTaskSender,
-    pub pens_config: &'a PensConfig,
+    pub config: &'a EngineConfig,
     pub document: &'a Document,
     pub store: &'a StrokeStore,
     pub camera: &'a Camera,
-    pub audioplayer: &'a Option<AudioPlayer>,
+    #[cfg(feature = "ui")]
+    pub audioplayer: &'a Option<crate::AudioPlayer>,
+    pub animation: &'a Animation,
+}
+
+/// Constructs an `EngineView` from an identifier containing an `Engine` instance.
+#[macro_export]
+macro_rules! engine_view {
+    ($engine:ident) => {
+        $crate::engine::EngineView {
+            tasks_tx: $engine.tasks_tx.clone(),
+            config: &$engine.config.read(),
+            document: &$engine.document,
+            store: &$engine.store,
+            camera: &$engine.camera,
+            #[cfg(feature = "ui")]
+            audioplayer: &$engine.audioplayer,
+            animation: &$engine.animation,
+        }
+    };
 }
 
 /// A mutable view into the engine, excluding the penholder.
 #[derive(Debug)]
 pub struct EngineViewMut<'a> {
     pub tasks_tx: EngineTaskSender,
-    pub pens_config: &'a mut PensConfig,
+    pub config: &'a mut EngineConfig,
     pub document: &'a mut Document,
     pub store: &'a mut StrokeStore,
     pub camera: &'a mut Camera,
-    pub audioplayer: &'a mut Option<AudioPlayer>,
+    #[cfg(feature = "ui")]
+    pub audioplayer: &'a mut Option<crate::AudioPlayer>,
+    pub animation: &'a mut Animation,
 }
 
-impl<'a> EngineViewMut<'a> {
+/// Constructs an `EngineViewMut` from an identifier containing an `Engine` instance.
+#[macro_export]
+macro_rules! engine_view_mut {
+    ($engine:ident) => {
+        $crate::engine::EngineViewMut {
+            tasks_tx: $engine.tasks_tx.clone(),
+            config: &mut $engine.config.write(),
+            document: &mut $engine.document,
+            store: &mut $engine.store,
+            camera: &mut $engine.camera,
+            #[cfg(feature = "ui")]
+            audioplayer: &mut $engine.audioplayer,
+            animation: &mut $engine.animation,
+        }
+    };
+}
+
+impl EngineViewMut<'_> {
     // Converts itself to the immutable view.
     pub(crate) fn as_im<'m>(&'m self) -> EngineView<'m> {
         EngineView::<'m> {
             tasks_tx: self.tasks_tx.clone(),
-            pens_config: self.pens_config,
+            config: self.config,
             document: self.document,
             store: self.store,
             camera: self.camera,
+            #[cfg(feature = "ui")]
             audioplayer: self.audioplayer,
+            animation: self.animation,
         }
     }
 }
@@ -105,26 +153,6 @@ pub enum EngineTask {
     Quit,
 }
 
-/// The engine configuration. Used when loading/saving the current configuration from/into persistent application settings.
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(default, rename = "engine_config")]
-pub struct EngineConfig {
-    #[serde(rename = "document")]
-    document: Document,
-    #[serde(rename = "pens_config")]
-    pens_config: PensConfig,
-    #[serde(rename = "penholder")]
-    penholder: PenHolder,
-    #[serde(rename = "import_prefs")]
-    import_prefs: ImportPrefs,
-    #[serde(rename = "export_prefs")]
-    export_prefs: ExportPrefs,
-    #[serde(rename = "pen_sounds")]
-    pen_sounds: bool,
-    #[serde(rename = "optimize_epd")]
-    optimize_epd: bool,
-}
-
 #[derive(Debug, Clone)]
 pub struct EngineTaskSender(mpsc::UnboundedSender<EngineTask>);
 
@@ -153,29 +181,22 @@ impl EngineTaskReceiver {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(default, rename = "engine")]
 pub struct Engine {
+    #[serde(rename = "config")]
+    pub(crate) config: EngineConfigShared,
     #[serde(rename = "document")]
     pub document: Document,
     #[serde(rename = "store")]
     pub store: StrokeStore,
     #[serde(rename = "camera")]
     pub camera: Camera,
-    #[serde(rename = "pens_config")]
-    pub pens_config: PensConfig,
     #[serde(rename = "penholder")]
     pub penholder: PenHolder,
-    #[serde(rename = "import_prefs")]
-    pub import_prefs: ImportPrefs,
-    #[serde(rename = "export_prefs")]
-    pub export_prefs: ExportPrefs,
-    #[serde(rename = "pen_sounds")]
-    pen_sounds: bool,
-    #[serde(rename = "optimize_epd")]
-    optimize_epd: bool,
 
+    #[cfg(feature = "ui")]
     #[serde(skip)]
-    audioplayer: Option<AudioPlayer>,
+    audioplayer: Option<crate::AudioPlayer>,
     #[serde(skip)]
-    visual_debug: bool,
+    pub animation: Animation,
     // the task sender. Must not be modified, only cloned.
     #[serde(skip)]
     tasks_tx: EngineTaskSender,
@@ -183,13 +204,13 @@ pub struct Engine {
     tasks_rx: Option<EngineTaskReceiver>,
     // Background rendering
     #[serde(skip)]
-    background_tile_image: Option<render::Image>,
+    background_tile_image: Option<Image>,
     #[cfg(feature = "ui")]
     #[serde(skip)]
     background_rendernodes: Vec<gtk4::gsk::RenderNode>,
     // Origin indicator rendering
     #[serde(skip)]
-    origin_indicator_image: Option<render::Image>,
+    origin_indicator_image: Option<Image>,
     #[cfg(feature = "ui")]
     #[serde(skip)]
     origin_indicator_rendernode: Option<gtk4::gsk::RenderNode>,
@@ -200,18 +221,15 @@ impl Default for Engine {
         let (tasks_tx, tasks_rx) = futures::channel::mpsc::unbounded::<EngineTask>();
 
         Self {
+            config: EngineConfigShared(Arc::new(RwLock::new(EngineConfig::default()))),
             document: Document::default(),
             store: StrokeStore::default(),
             camera: Camera::default(),
-            pens_config: PensConfig::default(),
             penholder: PenHolder::default(),
-            import_prefs: ImportPrefs::default(),
-            export_prefs: ExportPrefs::default(),
-            pen_sounds: false,
-            optimize_epd: false,
 
+            #[cfg(feature = "ui")]
             audioplayer: None,
-            visual_debug: false,
+            animation: Animation::default(),
             tasks_tx: EngineTaskSender(tasks_tx),
             tasks_rx: Some(EngineTaskReceiver(tasks_rx)),
             background_tile_image: None,
@@ -227,6 +245,27 @@ impl Default for Engine {
 impl Engine {
     pub(crate) const STROKE_BOUNDS_INTERSECTION_TOLERANCE: f64 = 1e-3;
 
+    pub fn install_config(
+        &mut self,
+        config: &EngineConfigShared,
+        data_dir: Option<PathBuf>,
+    ) -> WidgetFlags {
+        let mut widget_flags = WidgetFlags::default();
+
+        let pen_sounds = config.read().pen_sounds;
+
+        self.config = config.clone();
+        self.set_pen_sounds(pen_sounds, data_dir);
+
+        widget_flags |= self
+            .penholder
+            .reinstall_pen_current_style(&mut engine_view_mut!(self));
+        widget_flags |= self.doc_resize_to_fit_content();
+        widget_flags.redraw = true;
+        widget_flags.refresh_ui = true;
+        widget_flags
+    }
+
     pub fn engine_tasks_tx(&self) -> EngineTaskSender {
         self.tasks_tx.clone()
     }
@@ -235,76 +274,46 @@ impl Engine {
         self.tasks_rx.take()
     }
 
-    #[allow(unused)]
-    pub(crate) fn view(&self) -> EngineView {
-        EngineView {
-            tasks_tx: self.tasks_tx.clone(),
-            pens_config: &self.pens_config,
-            document: &self.document,
-            store: &self.store,
-            camera: &self.camera,
-            audioplayer: &self.audioplayer,
-        }
-    }
-
-    #[allow(unused)]
-    pub(crate) fn view_mut(&mut self) -> EngineViewMut {
-        EngineViewMut {
-            tasks_tx: self.tasks_tx.clone(),
-            pens_config: &mut self.pens_config,
-            document: &mut self.document,
-            store: &mut self.store,
-            camera: &mut self.camera,
-            audioplayer: &mut self.audioplayer,
-        }
-    }
-
     /// Whether pen sounds are enabled.
     pub fn pen_sounds(&self) -> bool {
-        self.pen_sounds
+        self.config.read().pen_sounds
     }
 
     /// Enables/disables the pen sounds.
     ///
     /// If pen sound should be enabled, the pkg data dir must be provided.
     pub fn set_pen_sounds(&mut self, pen_sounds: bool, pkg_data_dir: Option<PathBuf>) {
-        self.pen_sounds = pen_sounds;
+        self.config.write().pen_sounds = pen_sounds;
 
-        if pen_sounds {
-            if let Some(pkg_data_dir) = pkg_data_dir {
-                // Only create and init a new audioplayer if it does not already exists
-                if self.audioplayer.is_none() {
-                    self.audioplayer = match AudioPlayer::new_init(pkg_data_dir) {
-                        Ok(audioplayer) => Some(audioplayer),
-                        Err(e) => {
-                            error!("Creating a new audioplayer failed while enabling pen sounds, Err: {e:?}");
-                            None
+        #[cfg(feature = "ui")]
+        {
+            if pen_sounds {
+                if let Some(pkg_data_dir) = pkg_data_dir {
+                    // Only create and init a new audioplayer if it does not already exist
+                    if self.audioplayer.is_none() {
+                        self.audioplayer = match crate::AudioPlayer::new_init(pkg_data_dir) {
+                            Ok(audioplayer) => Some(audioplayer),
+                            Err(e) => {
+                                error!(
+                                    "Creating a new audioplayer failed while enabling pen sounds, Err: {e:?}"
+                                );
+                                None
+                            }
                         }
                     }
                 }
+            } else {
+                self.audioplayer.take();
             }
-        } else {
-            self.audioplayer.take();
+        }
+        #[cfg(not(feature = "ui"))]
+        {
+            let _ = pkg_data_dir;
         }
     }
 
     pub fn optimize_epd(&self) -> bool {
-        self.optimize_epd
-    }
-
-    pub fn set_optimize_epd(&mut self, optimize_epd: bool) {
-        self.optimize_epd = optimize_epd
-    }
-
-    pub fn visual_debug(&self) -> bool {
-        self.visual_debug
-    }
-
-    pub fn set_visual_debug(&mut self, visual_debug: bool) -> WidgetFlags {
-        let mut widget_flags = WidgetFlags::default();
-        self.visual_debug = visual_debug;
-        widget_flags.redraw = true;
-        widget_flags
+        self.config.read().optimize_epd
     }
 
     /// Takes a snapshot of the current state.
@@ -323,8 +332,8 @@ impl Engine {
         }
 
         EngineSnapshot {
-            document: self.document.clone_config(),
-            camera: self.camera.clone_config(),
+            document: self.document.extract_snapshot_data(),
+            camera: self.camera.extract_snapshot_data(),
             stroke_components: Arc::clone(&store_history_entry.stroke_components),
             chrono_components: Arc::clone(&store_history_entry.chrono_components),
             chrono_counter: store_history_entry.chrono_counter,
@@ -333,8 +342,8 @@ impl Engine {
 
     /// Imports an engine snapshot. A save file should always be loaded with this method.
     pub fn load_snapshot(&mut self, snapshot: EngineSnapshot) -> WidgetFlags {
-        self.document = snapshot.document.clone_config();
-        self.camera = snapshot.camera.clone_config();
+        self.document = snapshot.document.extract_snapshot_data();
+        self.camera = snapshot.camera.extract_snapshot_data();
         let mut widget_flags = self.store.import_from_snapshot(&snapshot)
             | self.doc_resize_autoexpand()
             | self.current_pen_update_state()
@@ -387,7 +396,7 @@ impl Engine {
     /// Handle a received task from tasks_rx.
     /// Returns [WidgetFlags] to indicate what needs to be updated in the UI.
     ///
-    /// An example how to use it:
+    /// An example of how to use it:
     /// ```rust, ignore
     ///
     /// glib::spawn_future_local(clone!(@weak canvas, @weak appwindow => async move {
@@ -397,7 +406,7 @@ impl Engine {
     ///        if let Some(task) = task_rx.next().await {
     ///            let (widget_flags, quit) = canvas.engine_mut().handle_engine_task(task);
     ///            canvas.emit_handle_widget_flags(widget_flags);
-
+    ///
     ///            if quit {
     ///                break;
     ///            }
@@ -419,7 +428,7 @@ impl Engine {
                     match state {
                         RenderCompState::Complete | RenderCompState::ForViewport(_) => {
                             // The rendering was already regenerated in the meantime,
-                            // so we just discard the the render task result
+                            // so we just discard the render task result
                         }
                         RenderCompState::BusyRenderingInTask => {
                             if (self.camera.image_scale()
@@ -428,7 +437,7 @@ impl Engine {
                                     + render_comp::RENDER_IMAGE_SCALE_TOLERANCE)
                                 .contains(&image_scale)
                             {
-                                // Only when the image scale is roughly the same to when the render task was started,
+                                // Only when the image scale is roughly the same as when the render task was started,
                                 // the new images are considered valid and can replace the old.
                                 self.store.replace_rendering_with_images(key, images);
                             }
@@ -476,19 +485,8 @@ impl Engine {
         pen_mode: Option<PenMode>,
         now: Instant,
     ) -> (EventPropagation, WidgetFlags) {
-        self.penholder.handle_pen_event(
-            event,
-            pen_mode,
-            now,
-            &mut EngineViewMut {
-                tasks_tx: self.engine_tasks_tx(),
-                pens_config: &mut self.pens_config,
-                document: &mut self.document,
-                store: &mut self.store,
-                camera: &mut self.camera,
-                audioplayer: &mut self.audioplayer,
-            },
-        )
+        self.penholder
+            .handle_pen_event(event, pen_mode, now, &mut engine_view_mut!(self))
     }
 
     /// Handle a pressed shortcut key.
@@ -497,33 +495,14 @@ impl Engine {
         shortcut_key: ShortcutKey,
         now: Instant,
     ) -> (EventPropagation, WidgetFlags) {
-        self.penholder.handle_pressed_shortcut_key(
-            shortcut_key,
-            now,
-            &mut EngineViewMut {
-                tasks_tx: self.engine_tasks_tx(),
-                pens_config: &mut self.pens_config,
-                document: &mut self.document,
-                store: &mut self.store,
-                camera: &mut self.camera,
-                audioplayer: &mut self.audioplayer,
-            },
-        )
+        self.penholder
+            .handle_pressed_shortcut_key(shortcut_key, now, &mut engine_view_mut!(self))
     }
 
     /// Change the pen style.
     pub fn change_pen_style(&mut self, new_style: PenStyle) -> WidgetFlags {
-        self.penholder.change_style(
-            new_style,
-            &mut EngineViewMut {
-                tasks_tx: self.engine_tasks_tx(),
-                pens_config: &mut self.pens_config,
-                document: &mut self.document,
-                store: &mut self.store,
-                camera: &mut self.camera,
-                audioplayer: &mut self.audioplayer,
-            },
-        )
+        self.penholder
+            .change_style(new_style, &mut engine_view_mut!(self))
     }
 
     /// Change the pen style (temporary) override.
@@ -531,45 +510,20 @@ impl Engine {
         &mut self,
         new_style_override: Option<PenStyle>,
     ) -> WidgetFlags {
-        self.penholder.change_style_override(
-            new_style_override,
-            &mut EngineViewMut {
-                tasks_tx: self.engine_tasks_tx(),
-                pens_config: &mut self.pens_config,
-                document: &mut self.document,
-                store: &mut self.store,
-                camera: &mut self.camera,
-                audioplayer: &mut self.audioplayer,
-            },
-        )
+        self.penholder
+            .change_style_override(new_style_override, &mut engine_view_mut!(self))
     }
 
     /// Change the pen mode. Relevant for stylus input.
     pub fn change_pen_mode(&mut self, pen_mode: PenMode) -> WidgetFlags {
-        self.penholder.change_pen_mode(
-            pen_mode,
-            &mut EngineViewMut {
-                tasks_tx: self.engine_tasks_tx(),
-                pens_config: &mut self.pens_config,
-                document: &mut self.document,
-                store: &mut self.store,
-                camera: &mut self.camera,
-                audioplayer: &mut self.audioplayer,
-            },
-        )
+        self.penholder
+            .change_pen_mode(pen_mode, &mut engine_view_mut!(self))
     }
 
     /// Reinstall the pen in the current style.
     pub fn reinstall_pen_current_style(&mut self) -> WidgetFlags {
         self.penholder
-            .reinstall_pen_current_style(&mut EngineViewMut {
-                tasks_tx: self.engine_tasks_tx(),
-                pens_config: &mut self.pens_config,
-                document: &mut self.document,
-                store: &mut self.store,
-                camera: &mut self.camera,
-                audioplayer: &mut self.audioplayer,
-            })
+            .reinstall_pen_current_style(&mut engine_view_mut!(self))
     }
 
     /// Set the engine active or inactive.
@@ -594,7 +548,7 @@ impl Engine {
         let strokes_bounds = self.store.strokes_bounds(&keys);
 
         let pages_bounds = doc_bounds
-            .split_extended_origin_aligned(self.document.format.size(), split_order)
+            .split_extended_origin_aligned(self.document.config.format.size(), split_order)
             .into_iter()
             .filter(|page_bounds| {
                 // Filter the pages out that don't intersect with any stroke
@@ -609,10 +563,7 @@ impl Engine {
 
         if pages_bounds.is_empty() {
             // If no page has content, return the origin page
-            vec![Aabb::new(
-                na::point![0.0, 0.0],
-                self.document.format.size().into(),
-            )]
+            vec![Aabb::new(Vector2::ZERO, self.document.config.format.size())]
         } else {
             pages_bounds
         }
@@ -652,31 +603,32 @@ impl Engine {
     ///
     /// Background rendering then needs to be updated.
     pub fn doc_resize_to_fit_content(&mut self) -> WidgetFlags {
-        self.document
-            .resize_to_fit_content(&self.store, &self.camera)
-            | self.update_rendering_current_viewport()
+        let widget_flags = self
+            .document
+            .resize_to_fit_content(&self.store, &self.camera);
+        widget_flags | self.update_rendering_current_viewport()
     }
 
     pub fn return_to_origin(&mut self, parent_width: Option<f64>) -> WidgetFlags {
         let zoom = self.camera.zoom();
         let new_offset = if let Some(parent_width) = parent_width {
-            if self.document.format.width() * zoom <= parent_width {
-                na::vector![
-                    (self.document.format.width() * 0.5 * zoom) - parent_width * 0.5,
-                    -Document::SHADOW_WIDTH * zoom
-                ]
+            if self.document.config.format.width() * zoom <= parent_width {
+                Vector2::new(
+                    (self.document.config.format.width() * 0.5 * zoom) - parent_width * 0.5,
+                    -Document::SHADOW_WIDTH * zoom,
+                )
             } else {
                 // If the zoomed format width is larger than the displayed surface, we zoom to a fixed origin
-                na::vector![
+                Vector2::new(
                     -Document::SHADOW_WIDTH * zoom,
-                    -Document::SHADOW_WIDTH * zoom
-                ]
+                    -Document::SHADOW_WIDTH * zoom,
+                )
             }
         } else {
-            na::vector![
+            Vector2::new(
                 -Document::SHADOW_WIDTH * zoom,
-                -Document::SHADOW_WIDTH * zoom
-            ]
+                -Document::SHADOW_WIDTH * zoom,
+            )
         };
         self.camera_set_offset_expand(new_offset)
     }
@@ -685,13 +637,13 @@ impl Engine {
     ///
     /// Background rendering then needs to be updated.
     pub fn doc_resize_autoexpand(&mut self) -> WidgetFlags {
-        self.document.resize_autoexpand(&self.store, &self.camera)
-            | self.update_rendering_current_viewport()
+        let widget_flags = self.document.resize_autoexpand(&self.store, &self.camera);
+        widget_flags | self.update_rendering_current_viewport()
     }
 
     /// Expand the doc to the camera when in autoexpanding layouts. called e.g. when dragging with touch.
     ///
-    /// Background and content rendering then needs to be updated.
+    /// Background and content rendering then need to be updated.
     pub fn doc_expand_autoexpand(&mut self) -> WidgetFlags {
         self.document.expand_autoexpand(&self.camera, &self.store)
     }
@@ -729,7 +681,7 @@ impl Engine {
     /// Update the viewport offset of the camera, clamped to mins and maxs values depending on the document layout.
     ///
     /// Background and content rendering then need to be updated.
-    pub fn camera_set_offset(&mut self, offset: na::Vector2<f64>) -> WidgetFlags {
+    pub fn camera_set_offset(&mut self, offset: Vector2) -> WidgetFlags {
         self.camera.set_offset(offset, &self.document)
     }
 
@@ -738,22 +690,21 @@ impl Engine {
     /// Expands the document when in autoexpanding layouts.
     ///
     /// Background and content rendering then need to be updated.
-    pub fn camera_set_offset_expand(&mut self, offset: na::Vector2<f64>) -> WidgetFlags {
-        self.camera.set_offset(offset, &self.document) | self.doc_expand_autoexpand()
+    pub fn camera_set_offset_expand(&mut self, offset: Vector2) -> WidgetFlags {
+        let widget_flags = self.camera.set_offset(offset, &self.document);
+        widget_flags | self.doc_expand_autoexpand()
     }
 
     /// Update the viewport size of the camera.
     ///
     /// Background and content rendering then need to be updated.
-    pub fn camera_set_size(&mut self, size: na::Vector2<f64>) -> WidgetFlags {
+    pub fn camera_set_size(&mut self, size: Vector2) -> WidgetFlags {
         self.camera.set_size(size)
     }
 
-    /// Update the viewport size of the camera.
-    ///
-    /// Background and content rendering then need to be updated.
-    pub fn camera_offset_mins_maxs(&self) -> (na::Vector2<f64>, na::Vector2<f64>) {
-        self.camera.offset_lower_upper(&self.document)
+    /// The minimum and maximum surface bounds (document including overshoot) in surface coordinate space.
+    pub fn camera_surface_mins_maxs(&self) -> (Vector2, Vector2) {
+        self.camera.surface_mins_maxs(&self.document)
     }
 
     /// Update the current pen with the current engine state.
@@ -761,14 +712,8 @@ impl Engine {
     /// Needs to be called when the engine state was changed outside of pen events.
     /// ( e.g. trash all strokes, set strokes selected, etc. )
     pub fn current_pen_update_state(&mut self) -> WidgetFlags {
-        self.penholder.current_pen_update_state(&mut EngineViewMut {
-            tasks_tx: self.tasks_tx.clone(),
-            pens_config: &mut self.pens_config,
-            document: &mut self.document,
-            store: &mut self.store,
-            camera: &mut self.camera,
-            audioplayer: &mut self.audioplayer,
-        })
+        self.penholder
+            .current_pen_update_state(&mut engine_view_mut!(self))
     }
 
     /// Fetch clipboard content from the current pen.
@@ -776,14 +721,7 @@ impl Engine {
     pub fn fetch_clipboard_content(
         &self,
     ) -> oneshot::Receiver<anyhow::Result<(Vec<(Vec<u8>, String)>, WidgetFlags)>> {
-        self.penholder.fetch_clipboard_content(&EngineView {
-            tasks_tx: self.engine_tasks_tx(),
-            pens_config: &self.pens_config,
-            document: &self.document,
-            store: &self.store,
-            camera: &self.camera,
-            audioplayer: &self.audioplayer,
-        })
+        self.penholder.fetch_clipboard_content(&engine_view!(self))
     }
 
     /// Cut clipboard content from the current pen.
@@ -791,19 +729,13 @@ impl Engine {
     pub fn cut_clipboard_content(
         &mut self,
     ) -> oneshot::Receiver<anyhow::Result<(Vec<(Vec<u8>, String)>, WidgetFlags)>> {
-        self.penholder.cut_clipboard_content(&mut EngineViewMut {
-            tasks_tx: self.engine_tasks_tx(),
-            pens_config: &mut self.pens_config,
-            document: &mut self.document,
-            store: &mut self.store,
-            camera: &mut self.camera,
-            audioplayer: &mut self.audioplayer,
-        })
+        self.penholder
+            .cut_clipboard_content(&mut engine_view_mut!(self))
     }
 
     pub fn set_doc_layout(&mut self, layout: Layout) -> WidgetFlags {
-        if self.document.layout != layout {
-            self.document.layout = layout;
+        if self.document.config.layout != layout {
+            self.document.config.layout = layout;
             self.doc_resize_to_fit_content()
         } else {
             self.doc_resize_autoexpand()
@@ -898,17 +830,8 @@ impl Engine {
     {
         let mut widget_flags = WidgetFlags::default();
         if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
-            widget_flags |= typewriter.change_text_style_in_modifying_stroke(
-                modify_func,
-                &mut EngineViewMut {
-                    tasks_tx: self.tasks_tx.clone(),
-                    pens_config: &mut self.pens_config,
-                    document: &mut self.document,
-                    store: &mut self.store,
-                    camera: &mut self.camera,
-                    audioplayer: &mut self.audioplayer,
-                },
-            )
+            widget_flags |= typewriter
+                .change_text_style_in_modifying_stroke(modify_func, &mut engine_view_mut!(self))
         }
         widget_flags
     }
@@ -917,16 +840,21 @@ impl Engine {
         let mut widget_flags = WidgetFlags::default();
         if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
             widget_flags |=
-                typewriter.remove_text_attributes_current_selection(&mut EngineViewMut {
-                    tasks_tx: self.tasks_tx.clone(),
-                    pens_config: &mut self.pens_config,
-                    document: &mut self.document,
-                    store: &mut self.store,
-                    camera: &mut self.camera,
-                    audioplayer: &mut self.audioplayer,
-                })
+                typewriter.remove_text_attributes_current_selection(&mut engine_view_mut!(self))
         }
         widget_flags
+    }
+
+    pub fn text_select_closest_word(&mut self) {
+        if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
+            typewriter.select_closest_word(&mut engine_view_mut!(self))
+        }
+    }
+
+    pub fn text_select_closest_line(&mut self) {
+        if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
+            typewriter.select_closest_line(&mut engine_view_mut!(self))
+        }
     }
 
     pub fn text_selection_toggle_attribute(
@@ -937,14 +865,7 @@ impl Engine {
         if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
             widget_flags |= typewriter.toggle_text_attribute_current_selection(
                 text_attribute,
-                &mut EngineViewMut {
-                    tasks_tx: self.tasks_tx.clone(),
-                    pens_config: &mut self.pens_config,
-                    document: &mut self.document,
-                    store: &mut self.store,
-                    camera: &mut self.camera,
-                    audioplayer: &mut self.audioplayer,
-                },
+                &mut engine_view_mut!(self),
             )
         }
         widget_flags
@@ -953,17 +874,8 @@ impl Engine {
     pub fn text_selection_add_attribute(&mut self, text_attribute: TextAttribute) -> WidgetFlags {
         let mut widget_flags = WidgetFlags::default();
         if let Pen::Typewriter(typewriter) = self.penholder.current_pen_mut() {
-            widget_flags |= typewriter.add_text_attribute_current_selection(
-                text_attribute,
-                &mut EngineViewMut {
-                    tasks_tx: self.tasks_tx.clone(),
-                    pens_config: &mut self.pens_config,
-                    document: &mut self.document,
-                    store: &mut self.store,
-                    camera: &mut self.camera,
-                    audioplayer: &mut self.audioplayer,
-                },
-            )
+            widget_flags |= typewriter
+                .add_text_attribute_current_selection(text_attribute, &mut engine_view_mut!(self))
         }
         widget_flags
     }
@@ -974,29 +886,28 @@ impl Engine {
             if typewriter.selection_range().is_some() {
                 widget_flags |= typewriter.replace_text_attribute_current_selection(
                     TextAttribute::TextColor(color),
-                    &mut EngineViewMut {
-                        tasks_tx: self.tasks_tx.clone(),
-                        pens_config: &mut self.pens_config,
-                        document: &mut self.document,
-                        store: &mut self.store,
-                        camera: &mut self.camera,
-                        audioplayer: &mut self.audioplayer,
-                    },
+                    &mut engine_view_mut!(self),
                 )
             } else {
                 widget_flags |= typewriter.change_text_style_in_modifying_stroke(
                     |style| style.color = color,
-                    &mut EngineViewMut {
-                        tasks_tx: self.tasks_tx.clone(),
-                        pens_config: &mut self.pens_config,
-                        document: &mut self.document,
-                        store: &mut self.store,
-                        camera: &mut self.camera,
-                        audioplayer: &mut self.audioplayer,
-                    },
+                    &mut engine_view_mut!(self),
                 )
             }
         }
         widget_flags
+    }
+
+    /// Handle a requested animation frame.
+    ///
+    /// Can request another frame using `EngineViewMut#animation.claim_frame()`.
+    pub fn handle_animation_frame(&mut self) {
+        self.penholder
+            .handle_animation_frame(&mut engine_view_mut!(self));
+    }
+
+    pub fn current_pen_style_w_override(&self) -> PenStyle {
+        self.penholder
+            .current_pen_style_w_override(&engine_view!(self))
     }
 }

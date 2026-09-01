@@ -27,11 +27,7 @@ desktop_file = i18n.merge_file(
 
 # Validate Desktop file
 if desktop_file_validate.found()
-    test(
-        'validate-desktop',
-        desktop_file_validate,
-        args: [desktop_file],
-    )
+    test('validate-desktop', desktop_file_validate, args: [desktop_file])
 endif
 
 # GSchema
@@ -54,10 +50,7 @@ if glib_compile_schemas.found()
     test(
         'validate-gschema',
         glib_compile_schemas,
-        args: [
-            '--dry-run',
-            datadir / 'glib-2.0' / 'schemas',
-        ],
+        args: ['--dry-run', datadir / 'glib-2.0' / 'schemas'],
     )
 endif
 
@@ -71,6 +64,7 @@ if host_machine.system() != 'windows'
     appdata_conf.set('APP_NAME_CAPITALIZED', app_name_capitalized)
     appdata_conf.set('APP_AUTHOR_NAME', app_author_name)
     appdata_conf.set('APP_WEBSITE', app_website)
+    appdata_conf.set('APP_REPO_URL', app_repo_url)
     appdata_conf.set('APP_ISSUES_URL', app_issues_url)
     appdata_conf.set('APP_SUPPORT_URL', app_support_url)
     appdata_conf.set('APP_DONATE_URL', app_donate_url)
@@ -165,6 +159,11 @@ configure_file(
 #   install_dir: datadir / 'dbus-1' / 'services',
 # )
 
+# Thumbnail
+if build_cli
+    install_data('rnote.thumbnailer', install_dir: datadir / 'thumbnailers')
+endif
+
 rnote_ui_gresources_icons_files = files(
     'icons/scalable/actions/add-page-symbolic.svg',
     'icons/scalable/actions/appwindow-fullscreen-symbolic.svg',
@@ -196,7 +195,6 @@ rnote_ui_gresources_icons_files = files(
     'icons/scalable/actions/dir-right-symbolic.svg',
     'icons/scalable/actions/dir-up-symbolic.svg',
     'icons/scalable/actions/doc-create-symbolic.svg',
-    'icons/scalable/actions/doc-save-symbolic.svg',
     'icons/scalable/actions/dock-left-symbolic.svg',
     'icons/scalable/actions/dock-right-symbolic.svg',
     'icons/scalable/actions/dot-symbolic.svg',
@@ -232,6 +230,7 @@ rnote_ui_gresources_icons_files = files(
     'icons/scalable/actions/pen-shaper-style-rough-symbolic.svg',
     'icons/scalable/actions/pen-shaper-style-smooth-symbolic.svg',
     'icons/scalable/actions/pen-shaper-symbolic.svg',
+    'icons/scalable/actions/pen-tools-laser-symbolic.svg',
     'icons/scalable/actions/pen-tools-offsetcameratool-symbolic.svg',
     'icons/scalable/actions/pen-tools-symbolic.svg',
     'icons/scalable/actions/pen-tools-verticalspacetool-symbolic.svg',
@@ -243,7 +242,9 @@ rnote_ui_gresources_icons_files = files(
     'icons/scalable/actions/remove-page-symbolic.svg',
     'icons/scalable/actions/reset-state-symbolic.svg',
     'icons/scalable/actions/resize-to-fit-content-symbolic.svg',
+    'icons/scalable/actions/restore-symbolic.svg',
     'icons/scalable/actions/return-origin-page-symbolic.svg',
+    'icons/scalable/actions/save-symbolic.svg',
     'icons/scalable/actions/selection-deselect-all-symbolic.svg',
     'icons/scalable/actions/selection-duplicate-symbolic.svg',
     'icons/scalable/actions/selection-invert-color-symbolic.svg',
@@ -337,6 +338,7 @@ rnote_ui_gresources_icons_files = files(
     'icons/scalable/actions/zoom-fit-width-symbolic.svg',
     'icons/scalable/actions/zoom-in-symbolic.svg',
     'icons/scalable/actions/zoom-out-symbolic.svg',
+    'icons/scalable/actions/zoom-real-width-symbolic.svg',
     'icons/scalable/apps/rnote-devel.svg',
     'icons/scalable/apps/rnote.svg',
     'icons/scalable/mimetypes/application-rnote.svg',
@@ -344,11 +346,23 @@ rnote_ui_gresources_icons_files = files(
 )
 
 rnote_ui_gresources_ui_files = files(
+    'ui/appmenu.ui',
+    'ui/appwindow.ui',
+    'ui/canvasmenu.ui',
+    'ui/canvaswrapper.ui',
+    'ui/colorpicker.ui',
+    'ui/contextmenu.ui',
     'ui/dialogs/dialogs.ui',
     'ui/dialogs/export.ui',
     'ui/dialogs/import.ui',
+    'ui/filerow.ui',
     'ui/groupediconpicker/groupediconpicker.ui',
     'ui/groupediconpicker/groupediconpickergroup.ui',
+    'ui/iconpicker.ui',
+    'ui/mainheader.ui',
+    'ui/overlays.ui',
+    'ui/penpicker.ui',
+    'ui/penshortcutrow.ui',
     'ui/penssidebar/brushpage.ui',
     'ui/penssidebar/eraserpage.ui',
     'ui/penssidebar/penssidebar.ui',
@@ -356,20 +370,6 @@ rnote_ui_gresources_ui_files = files(
     'ui/penssidebar/shaperpage.ui',
     'ui/penssidebar/toolspage.ui',
     'ui/penssidebar/typewriterpage.ui',
-    'ui/workspacesbar/workspacerow.ui',
-    'ui/workspacesbar/workspacesbar.ui',
-    'ui/appmenu.ui',
-    'ui/appwindow.ui',
-    'ui/canvasmenu.ui',
-    'ui/canvaswrapper.ui',
-    'ui/colorpicker.ui',
-    'ui/contextmenu.ui',
-    'ui/filerow.ui',
-    'ui/iconpicker.ui',
-    'ui/mainheader.ui',
-    'ui/overlays.ui',
-    'ui/penpicker.ui',
-    'ui/penshortcutrow.ui',
     'ui/settingspanel.ui',
     'ui/shortcuts.ui',
     'ui/sidebar.ui',
@@ -378,12 +378,12 @@ rnote_ui_gresources_ui_files = files(
     'ui/style.css',
     'ui/unitentry.ui',
     'ui/workspacebrowser.ui',
+    'ui/workspacesbar/workspacerow.ui',
+    'ui/workspacesbar/workspacesbar.ui',
 )
 
 rnote_ui_gresources_files = [
     rnote_ui_gresources_icons_files,
     rnote_ui_gresources_ui_files,
-    files(
-        'resources.gresource.xml',
-    ),
+    files('resources.gresource.xml'),
 ]

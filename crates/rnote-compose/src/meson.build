@@ -42,8 +42,6 @@ rnote_compose_sources = files(
     'style/textured/mod.rs',
     'style/textured/textureddotsdistribution.rs',
     'style/textured/texturedoptions.rs',
-    'transform/mod.rs',
-    'transform/transformable.rs',
     'color.rs',
     'constraints.rs',
     'eventresult.rs',
@@ -52,5 +50,6 @@ rnote_compose_sources = files(
     'penevent.rs',
     'serialize.rs',
     'splitorder.rs',
+    'transformable.rs',
     'utils.rs',
 )

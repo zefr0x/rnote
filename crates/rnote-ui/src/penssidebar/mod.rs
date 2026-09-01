@@ -18,8 +18,8 @@ pub(crate) use typewriterpage::RnTypewriterPage;
 // Imports
 use crate::RnAppWindow;
 use gtk4::{
-    glib, glib::clone, prelude::*, subclass::prelude::*, CompositeTemplate, Stack, StackPage,
-    Widget,
+    CompositeTemplate, Stack, StackPage, Widget, glib, glib::clone, prelude::*,
+    subclass::prelude::*,
 };
 
 mod imp {
@@ -88,7 +88,8 @@ mod imp {
 
 glib::wrapper! {
     pub(crate) struct RnPensSideBar(ObjectSubclass<imp::RnPensSideBar>)
-        @extends gtk4::Widget;
+        @extends Widget,
+        @implements gtk4::Accessible, gtk4::Buildable, gtk4::ConstraintTarget;
 }
 
 impl Default for RnPensSideBar {
@@ -134,36 +135,34 @@ impl RnPensSideBar {
         self.imp()
             .sidebar_stack
             .get()
-            .connect_visible_child_name_notify(clone!(@weak appwindow => move |sidebar_stack| {
-                if let Some(child_name) = sidebar_stack.visible_child_name() {
-                    match child_name.to_value().get::<String>().unwrap().as_str() {
-                        "brush_page" => {
-                            adw::prelude::ActionGroupExt::activate_action(&appwindow, "pen-style",
-                                Some(&PenStyle::Brush.to_string().to_variant()));
-                        },
-                        "shaper_page" => {
-                            adw::prelude::ActionGroupExt::activate_action(&appwindow, "pen-style",
-                                Some(&PenStyle::Shaper.to_string().to_variant()));
-                        },
-                        "typewriter_page" => {
-                            adw::prelude::ActionGroupExt::activate_action(&appwindow, "pen-style",
-                                Some(&PenStyle::Typewriter.to_string().to_variant()));
-                        },
-                        "eraser_page" => {
-                            adw::prelude::ActionGroupExt::activate_action(&appwindow, "pen-style",
-                                Some(&PenStyle::Eraser.to_string().to_variant()));
-                        }
-                        "selector_page" => {
-                            adw::prelude::ActionGroupExt::activate_action(&appwindow, "pen-style",
-                                Some(&PenStyle::Selector.to_string().to_variant()));
-                        }
-                        "tools_page" => {
-                            adw::prelude::ActionGroupExt::activate_action(&appwindow, "pen-style",
-                                Some(&PenStyle::Tools.to_string().to_variant()));
-                        }
-                        _ => {}
+            .connect_visible_child_name_notify(clone!(
+                #[weak]
+                appwindow,
+                move |sidebar_stack| {
+                    if let Some(child_name) = sidebar_stack.visible_child_name() {
+                        match child_name.to_value().get::<String>().unwrap().as_str() {
+                            "brush_page" => {
+                                appwindow.set_pen_style(PenStyle::Brush);
+                            }
+                            "shaper_page" => {
+                                appwindow.set_pen_style(PenStyle::Shaper);
+                            }
+                            "typewriter_page" => {
+                                appwindow.set_pen_style(PenStyle::Typewriter);
+                            }
+                            "eraser_page" => {
+                                appwindow.set_pen_style(PenStyle::Eraser);
+                            }
+                            "selector_page" => {
+                                appwindow.set_pen_style(PenStyle::Selector);
+                            }
+                            "tools_page" => {
+                                appwindow.set_pen_style(PenStyle::Tools);
+                            }
+                            _ => {}
+                        };
                     };
-                };
-            }));
+                }
+            ));
     }
 }

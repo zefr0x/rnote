@@ -3,18 +3,18 @@ mod appactions;
 
 // Imports
 use crate::{
+    RnAppMenu, RnAppWindow, RnCanvas, RnCanvasMenu, RnCanvasWrapper, RnColorPicker, RnIconPicker,
+    RnMainHeader, RnOverlays, RnPenPicker, RnPensSideBar, RnSettingsPanel, RnSidebar,
+    RnStrokeContentPreview, RnStrokeWidthPicker, RnUnitEntry, RnWorkspaceBrowser,
     colorpicker::RnColorPad, colorpicker::RnColorSetter, config, penssidebar::RnBrushPage,
     penssidebar::RnEraserPage, penssidebar::RnSelectorPage, penssidebar::RnShaperPage,
     penssidebar::RnToolsPage, penssidebar::RnTypewriterPage, settingspanel::RnPenShortcutRow,
     strokewidthpicker::RnStrokeWidthPreview, strokewidthpicker::RnStrokeWidthSetter,
-    strokewidthpicker::StrokeWidthPreviewStyle, workspacebrowser::workspacesbar::RnWorkspaceRow,
-    workspacebrowser::RnFileRow, workspacebrowser::RnWorkspacesBar, RnAppMenu, RnAppWindow,
-    RnCanvas, RnCanvasMenu, RnCanvasWrapper, RnColorPicker, RnIconPicker, RnMainHeader, RnOverlays,
-    RnPenPicker, RnPensSideBar, RnSettingsPanel, RnSidebar, RnStrokeContentPreview,
-    RnStrokeWidthPicker, RnUnitEntry, RnWorkspaceBrowser,
+    strokewidthpicker::StrokeWidthPreviewStyle, workspacebrowser::RnFileRow,
+    workspacebrowser::RnWorkspacesBar, workspacebrowser::workspacesbar::RnWorkspaceRow,
 };
 use adw::subclass::prelude::AdwApplicationImpl;
-use gtk4::{gio, glib, glib::clone, prelude::*, subclass::prelude::*};
+use gtk4::{WindowGroup, gio, glib, glib::clone, prelude::*, subclass::prelude::*};
 
 mod imp {
     use super::*;
@@ -74,9 +74,13 @@ mod imp {
                 .map(|w| w.downcast::<RnAppWindow>().unwrap())
             {
                 if let Some(input_file) = input_file {
-                    glib::spawn_future_local(clone!(@weak appwindow => async move {
-                        appwindow.open_file_w_dialogs(input_file, None, true).await;
-                    }));
+                    glib::spawn_future_local(clone!(
+                        #[weak]
+                        appwindow,
+                        async move {
+                            appwindow.open_file_w_dialogs(input_file, None, true).await;
+                        }
+                    ));
                 }
             } else {
                 self.new_appwindow_init_show(input_file);
@@ -128,15 +132,41 @@ mod imp {
         /// Initializes and shows a new app window
         pub(crate) fn new_appwindow_init_show(&self, input_file: Option<gio::File>) {
             let appwindow = RnAppWindow::new(self.obj().upcast_ref::<gtk4::Application>());
-            appwindow.init();
+            appwindow.init(true);
+            // create a window group for each app window
+            // to make modals only impact the current app
+            // window.
+            // See issue: https://github.com/flxzt/rnote/issues/1461
+            let window_group = WindowGroup::new();
+            window_group.add_window(&appwindow);
+
             appwindow.present();
 
             // Loading in input file in the first tab, if Some
             if let Some(input_file) = input_file {
-                glib::spawn_future_local(clone!(@weak appwindow => async move {
-                    appwindow.open_file_w_dialogs(input_file, None, false).await;
-                }));
+                glib::spawn_future_local(clone!(
+                    #[weak]
+                    appwindow,
+                    async move {
+                        appwindow.open_file_w_dialogs(input_file, None, false).await;
+                    }
+                ));
             }
+        }
+
+        pub(crate) fn new_appwindow_init_return_tab(&self) -> adw::TabView {
+            let appwindow = RnAppWindow::new(self.obj().upcast_ref::<gtk4::Application>());
+            appwindow.init(false);
+
+            // create a window group for each app window
+            // to make modals only impact the current app
+            // window.
+            // See issue: https://github.com/flxzt/rnote/issues/1461
+            let window_group = WindowGroup::new();
+            window_group.add_window(&appwindow);
+            appwindow.present();
+
+            appwindow.overlays().tabview()
         }
     }
 }
@@ -176,5 +206,9 @@ impl RnApp {
 
     pub(crate) fn new_appwindow_init_show(&self) {
         self.imp().new_appwindow_init_show(None);
+    }
+
+    pub(crate) fn new_appwindow_init_return_tab(&self) -> adw::TabView {
+        self.imp().new_appwindow_init_return_tab()
     }
 }
